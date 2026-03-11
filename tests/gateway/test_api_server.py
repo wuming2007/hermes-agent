@@ -1159,3 +1159,123 @@ class TestCORS:
             assert resp.status == 200
             assert resp.headers.get("Access-Control-Allow-Origin") == "*"
             assert "Authorization" in resp.headers.get("Access-Control-Allow-Headers", "")
+
+
+# ---------------------------------------------------------------------------
+# Conversation parameter
+# ---------------------------------------------------------------------------
+
+
+class TestConversationParameter:
+    @pytest.mark.asyncio
+    async def test_conversation_creates_new(self, adapter):
+        """First request with a conversation name works (new conversation)."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    {"final_response": "Hello!", "messages": [], "api_calls": 1},
+                    {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                )
+                resp = await cli.post("/v1/responses", json={
+                    "input": "hi",
+                    "conversation": "my-chat",
+                })
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["status"] == "completed"
+                # Conversation mapping should be set
+                assert "my-chat" in adapter._conversations
+
+    @pytest.mark.asyncio
+    async def test_conversation_chains_automatically(self, adapter):
+        """Second request with same conversation name chains to first."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    {"final_response": "First response", "messages": [], "api_calls": 1},
+                    {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                )
+                # First request
+                resp1 = await cli.post("/v1/responses", json={
+                    "input": "hello",
+                    "conversation": "test-conv",
+                })
+                assert resp1.status == 200
+                data1 = await resp1.json()
+                resp1_id = data1["id"]
+
+                # Second request — should chain
+                mock_run.return_value = (
+                    {"final_response": "Second response", "messages": [], "api_calls": 1},
+                    {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+                )
+                resp2 = await cli.post("/v1/responses", json={
+                    "input": "follow up",
+                    "conversation": "test-conv",
+                })
+                assert resp2.status == 200
+
+                # The second call should have received conversation history from the first
+                assert mock_run.call_count == 2
+                second_call_kwargs = mock_run.call_args_list[1]
+                history = second_call_kwargs.kwargs.get("conversation_history",
+                          second_call_kwargs[1].get("conversation_history", []) if len(second_call_kwargs) > 1 else [])
+                # History should be non-empty (contains messages from first response)
+                assert len(history) > 0
+
+    @pytest.mark.asyncio
+    async def test_conversation_and_previous_response_id_conflict(self, adapter):
+        """Cannot use both conversation and previous_response_id."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/v1/responses", json={
+                "input": "hi",
+                "conversation": "my-chat",
+                "previous_response_id": "resp_abc123",
+            })
+            assert resp.status == 400
+            data = await resp.json()
+            assert "Cannot use both" in data["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_separate_conversations_are_isolated(self, adapter):
+        """Different conversation names have independent histories."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    {"final_response": "Response A", "messages": [], "api_calls": 1},
+                    {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                )
+                # Conversation A
+                await cli.post("/v1/responses", json={"input": "conv-a msg", "conversation": "conv-a"})
+                # Conversation B
+                mock_run.return_value = (
+                    {"final_response": "Response B", "messages": [], "api_calls": 1},
+                    {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                )
+                await cli.post("/v1/responses", json={"input": "conv-b msg", "conversation": "conv-b"})
+
+                # They should have different response IDs in the mapping
+                assert adapter._conversations["conv-a"] != adapter._conversations["conv-b"]
+
+    @pytest.mark.asyncio
+    async def test_conversation_store_false_no_mapping(self, adapter):
+        """If store=false, conversation mapping is not updated."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    {"final_response": "Ephemeral", "messages": [], "api_calls": 1},
+                    {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                )
+                resp = await cli.post("/v1/responses", json={
+                    "input": "hi",
+                    "conversation": "ephemeral-chat",
+                    "store": False,
+                })
+                assert resp.status == 200
+                # Conversation mapping should NOT be set since store=false
+                assert "ephemeral-chat" not in adapter._conversations

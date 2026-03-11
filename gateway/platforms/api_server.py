@@ -137,6 +137,8 @@ class APIServerAdapter(BasePlatformAdapter):
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
         self._response_store = ResponseStore()
+        # Conversation name → latest response_id mapping
+        self._conversations: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Auth helper
@@ -370,7 +372,20 @@ class APIServerAdapter(BasePlatformAdapter):
 
         instructions = body.get("instructions")
         previous_response_id = body.get("previous_response_id")
+        conversation = body.get("conversation")
         store = body.get("store", True)
+
+        # conversation and previous_response_id are mutually exclusive
+        if conversation and previous_response_id:
+            return web.json_response(
+                {"error": {"message": "Cannot use both 'conversation' and 'previous_response_id'", "type": "invalid_request_error"}},
+                status=400,
+            )
+
+        # Resolve conversation name to latest response_id
+        if conversation:
+            previous_response_id = self._conversations.get(conversation)
+            # No error if conversation doesn't exist yet — it's a new conversation
 
         # Normalize input to message list
         input_messages: List[Dict[str, str]] = []
@@ -489,6 +504,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 "conversation_history": full_history,
                 "instructions": instructions,
             })
+            # Update conversation mapping so the next request with the same
+            # conversation name automatically chains to this response
+            if conversation:
+                self._conversations[conversation] = response_id
 
         return web.json_response(response_data)
 
