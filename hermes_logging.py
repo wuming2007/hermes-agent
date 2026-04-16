@@ -25,6 +25,7 @@ Session context:
 
 import logging
 import os
+import sys
 import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -39,6 +40,14 @@ _logging_initialized = False
 
 # Thread-local storage for per-conversation session context.
 _session_context = threading.local()
+
+# Process-level stderr noise suppression state.
+_stderr_noise_filter_installed = False
+_stderr_noise_filter_lock = threading.Lock()
+
+_MALLOC_STACK_LOGGING_NOISE = (
+    "MallocStackLogging: can't turn off malloc stack logging because it was not enabled."
+)
 
 # Default log format — includes timestamp, level, optional session tag,
 # logger name, and message.  The ``%(session_tag)s`` field is guaranteed to
@@ -112,6 +121,106 @@ def _install_session_record_factory() -> None:
 
     _session_record_factory._hermes_session_injector = True  # type: ignore[attr-defined]
     logging.setLogRecordFactory(_session_record_factory)
+
+
+def _should_suppress_stderr_line(line: str) -> bool:
+    """Return True only for the exact macOS malloc-stack-logging noise line.
+
+    The allocator warning is emitted as raw stderr text by short-lived macOS
+    Python processes and can flood gateway logs. Keep the matcher intentionally
+    narrow so unrelated stderr remains visible.
+    """
+    text = (line or "").strip()
+    if not text or _MALLOC_STACK_LOGGING_NOISE not in text:
+        return False
+    prefix, _, suffix = text.partition(_MALLOC_STACK_LOGGING_NOISE)
+    prefix = prefix.strip()
+    if suffix.strip():
+        return False
+    return prefix.startswith("python(") or prefix.startswith("python3(") or prefix.startswith("python3.")
+
+
+def _install_macos_stderr_noise_filter() -> None:
+    """Filter known benign macOS allocator noise from process stderr.
+
+    This operates at the file-descriptor level so C-level writes to fd 2 are
+    suppressed too, not just Python logging records. Only installed on macOS.
+    """
+    global _stderr_noise_filter_installed
+
+    if sys.platform != "darwin":
+        return
+    if os.getenv("HERMES_DISABLE_STDERR_NOISE_FILTER", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    if _stderr_noise_filter_installed:
+        return
+
+    with _stderr_noise_filter_lock:
+        if _stderr_noise_filter_installed:
+            return
+
+        stderr_obj = getattr(sys, "stderr", None)
+        if stderr_obj is None or not hasattr(stderr_obj, "fileno"):
+            return
+
+        read_fd = None
+        write_fd = None
+        try:
+            stderr_fd = stderr_obj.fileno()
+            original_fd = os.dup(stderr_fd)
+            read_fd, write_fd = os.pipe()
+            os.dup2(write_fd, stderr_fd)
+            os.close(write_fd)
+        except OSError:
+            if read_fd is not None:
+                try:
+                    os.close(read_fd)
+                except OSError:
+                    pass
+            if write_fd is not None:
+                try:
+                    os.close(write_fd)
+                except OSError:
+                    pass
+            return
+
+        def _pump() -> None:
+            buffer = b""
+            try:
+                while True:
+                    chunk = os.read(read_fd, 4096)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    while b"\n" in buffer:
+                        raw_line, buffer = buffer.split(b"\n", 1)
+                        decoded = raw_line.decode("utf-8", errors="replace")
+                        if _should_suppress_stderr_line(decoded):
+                            continue
+                        os.write(original_fd, raw_line + b"\n")
+                if buffer:
+                    decoded = buffer.decode("utf-8", errors="replace")
+                    if not _should_suppress_stderr_line(decoded):
+                        os.write(original_fd, buffer)
+            except OSError:
+                pass
+            finally:
+                try:
+                    os.close(read_fd)
+                except OSError:
+                    pass
+                try:
+                    os.close(original_fd)
+                except OSError:
+                    pass
+
+        thread = threading.Thread(
+            target=_pump,
+            name="hermes-stderr-noise-filter",
+            daemon=True,
+        )
+        thread.start()
+        _stderr_noise_filter_installed = True
 
 
 # Install immediately on import — session_tag is available on all records
@@ -213,6 +322,8 @@ def setup_logging(
 
     # Lazy import to avoid circular dependency at module load time.
     from agent.redact import RedactingFormatter
+
+    _install_macos_stderr_noise_filter()
 
     root = logging.getLogger()
 

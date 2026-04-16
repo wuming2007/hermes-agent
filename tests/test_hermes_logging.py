@@ -14,7 +14,7 @@ import hermes_logging
 
 
 @pytest.fixture(autouse=True)
-def _reset_logging_state():
+def _reset_logging_state(monkeypatch):
     """Reset the module-level sentinel and clean up root logger handlers
     added by setup_logging() so tests don't leak state.
 
@@ -24,6 +24,8 @@ def _reset_logging_state():
     assertions are stable regardless of test ordering.
     """
     hermes_logging._logging_initialized = False
+    hermes_logging._stderr_noise_filter_installed = False
+    monkeypatch.setenv("HERMES_DISABLE_STDERR_NOISE_FILTER", "1")
     root = logging.getLogger()
     # Strip ALL RotatingFileHandlers — not just the ones we added — so that
     # handlers leaked from other test modules in the same xdist worker don't
@@ -60,6 +62,29 @@ def hermes_home(tmp_path, monkeypatch):
 
 class TestSetupLogging:
     """setup_logging() creates agent.log + errors.log with RotatingFileHandler."""
+
+    def test_matches_only_known_malloc_stderr_noise(self):
+        assert hermes_logging._should_suppress_stderr_line(
+            "python(58442) MallocStackLogging: can't turn off malloc stack logging because it was not enabled."
+        )
+        assert hermes_logging._should_suppress_stderr_line(
+            "python3(59548) MallocStackLogging: can't turn off malloc stack logging because it was not enabled."
+        )
+        assert not hermes_logging._should_suppress_stderr_line(
+            "MallocStackLogging: can't turn off malloc stack logging because it was not enabled."
+        )
+        assert not hermes_logging._should_suppress_stderr_line(
+            "python(1) MallocStackLogging: something else happened"
+        )
+        assert not hermes_logging._should_suppress_stderr_line(
+            "python(1) real error before MallocStackLogging: can't turn off malloc stack logging because it was not enabled. and more"
+        )
+
+    def test_stderr_noise_filter_skips_non_macos(self, monkeypatch):
+        monkeypatch.setattr(hermes_logging.sys, "platform", "linux")
+        monkeypatch.setattr(hermes_logging.os, "pipe", lambda: (_ for _ in ()).throw(AssertionError("os.pipe should not be called")))
+        hermes_logging._install_macos_stderr_noise_filter()
+        assert hermes_logging._stderr_noise_filter_installed is False
 
     def test_creates_log_directory(self, hermes_home):
         log_dir = hermes_logging.setup_logging(hermes_home=hermes_home)
