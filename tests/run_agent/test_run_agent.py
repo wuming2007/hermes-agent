@@ -4237,3 +4237,193 @@ class TestLayeredRetrievalPrefetch:
 
         spy.prefetch_all.assert_called_once()
         spy.prefetch_for_policy.assert_not_called()
+
+
+# ===================================================================
+# Consistency guard wire-through (PR3)
+# ===================================================================
+
+
+def _drive_simple_turn(agent, message: str, *, content: str = "candidate"):
+    """Like _run_one_turn but lets the test control the assistant content
+    so guard wiring can be observed cleanly."""
+    resp = _mock_response(content=content, finish_reason="stop")
+    agent.client.chat.completions.create.return_value = resp
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        return agent.run_conversation(message)
+
+
+class TestConsistencyGuardWiring:
+    """PR3 wiring: post-generation guard runs based on verification_plan,
+    revises final_response when full guard says revise, stays non-fatal,
+    and does not pollute system prompt or persisted-but-unrelated state."""
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+    def test_disabled_cognition_does_not_invoke_guard(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = {"enabled": False}
+        with (
+            patch("run_agent.run_light_consistency_check") as light,
+            patch("run_agent.run_full_consistency_check") as full,
+        ):
+            _drive_simple_turn(agent, "hello")
+        light.assert_not_called()
+        full.assert_not_called()
+
+    def test_fast_route_with_none_plan_does_not_invoke_guard(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        with (
+            patch("run_agent.run_light_consistency_check") as light,
+            patch("run_agent.run_full_consistency_check") as full,
+        ):
+            _drive_simple_turn(agent, "ping")
+        # Fast mode -> verification_plan="none" -> no guard.
+        light.assert_not_called()
+        full.assert_not_called()
+
+    def test_standard_route_invokes_light_guard(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        long_prompt = (
+            "Could you please help me draft a thoughtful and friendly multi-paragraph "
+            "note about our upcoming team picnic that covers food preferences, "
+            "accessibility needs, transportation options, weather contingencies, "
+            "and a few possible time slots so everyone can weigh in early?"
+        )
+        from agent.consistency_guard import VerificationResult
+        with (
+            patch(
+                "run_agent.run_light_consistency_check",
+                return_value=VerificationResult(
+                    applied=True, plan="light",
+                    original_response="candidate", final_response="candidate",
+                    changed=False,
+                ),
+            ) as light,
+            patch("run_agent.run_full_consistency_check") as full,
+        ):
+            _drive_simple_turn(agent, long_prompt)
+        light.assert_called_once()
+        full.assert_not_called()
+
+    def test_deep_route_invokes_full_guard(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        from agent.consistency_guard import VerificationResult
+        with (
+            patch("run_agent.run_light_consistency_check") as light,
+            patch(
+                "run_agent.run_full_consistency_check",
+                return_value=VerificationResult(
+                    applied=True, plan="full",
+                    original_response="candidate", final_response="candidate",
+                    changed=False,
+                ),
+            ) as full,
+        ):
+            _drive_simple_turn(agent, "上次的設計回顧")
+        full.assert_called_once()
+        light.assert_not_called()
+
+    def test_full_guard_revise_overrides_final_response(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        from agent.consistency_guard import VerificationResult
+        with patch(
+            "run_agent.run_full_consistency_check",
+            return_value=VerificationResult(
+                applied=True, plan="full",
+                original_response="candidate", final_response="REVISED",
+                changed=True, notes=("issue:x",),
+            ),
+        ):
+            result = _drive_simple_turn(agent, "上次的設計回顧", content="candidate")
+        assert result["final_response"] == "REVISED"
+
+    def test_revise_also_updates_last_assistant_message(self, agent):
+        """If the guard rewrote the response, the last assistant message
+        in messages must reflect the revised text so persistence and
+        downstream hooks see the same text the caller does."""
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        from agent.consistency_guard import VerificationResult
+        with patch(
+            "run_agent.run_full_consistency_check",
+            return_value=VerificationResult(
+                applied=True, plan="full",
+                original_response="candidate", final_response="REVISED",
+                changed=True,
+            ),
+        ):
+            result = _drive_simple_turn(agent, "上次的設計回顧", content="candidate")
+        # Walk the returned messages list for the last assistant entry.
+        assistant_msgs = [m for m in result["messages"] if m.get("role") == "assistant"]
+        assert assistant_msgs, "expected at least one assistant message"
+        assert assistant_msgs[-1]["content"] == "REVISED"
+
+    def test_guard_exception_is_non_fatal(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        with patch(
+            "run_agent.run_full_consistency_check",
+            side_effect=RuntimeError("guard upstream exploded"),
+        ):
+            result = _drive_simple_turn(agent, "上次的設計回顧", content="candidate")
+        assert result["completed"] is True
+        # Candidate must survive the guard failure.
+        assert result["final_response"] == "candidate"
+
+    def test_turn_metadata_records_verification_outcome(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        from agent.consistency_guard import VerificationResult
+        with patch(
+            "run_agent.run_full_consistency_check",
+            return_value=VerificationResult(
+                applied=True, plan="full",
+                original_response="candidate", final_response="REVISED",
+                changed=True, notes=("issue:wrong",),
+            ),
+        ):
+            _drive_simple_turn(agent, "上次的設計回顧", content="candidate")
+        meta = agent._current_turn_cognition_metadata
+        assert meta.get("verification_applied") is True
+        assert meta.get("verification_plan") == "full"
+        assert meta.get("verification_changed") is True
+        assert "issue:wrong" in (meta.get("verification_notes") or [])
+
+    def test_disabled_cognition_does_not_invalidate_system_prompt_cache(self, agent):
+        """Belt-and-suspenders for the "no system-prompt mutation" rule."""
+        self._setup_agent(agent)
+        agent._cognition_config = {"enabled": False}
+        cached_before = agent._cached_system_prompt
+        _drive_simple_turn(agent, "hello")
+        assert agent._cached_system_prompt == cached_before
+
+    def test_full_guard_does_not_invalidate_system_prompt_cache(self, agent):
+        """Same invariant for the active full-guard path."""
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        cached_before = agent._cached_system_prompt
+        from agent.consistency_guard import VerificationResult
+        with patch(
+            "run_agent.run_full_consistency_check",
+            return_value=VerificationResult(
+                applied=True, plan="full",
+                original_response="candidate", final_response="REVISED",
+                changed=True,
+            ),
+        ):
+            _drive_simple_turn(agent, "上次的設計回顧")
+        assert agent._cached_system_prompt == cached_before
