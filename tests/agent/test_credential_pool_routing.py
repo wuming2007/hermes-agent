@@ -115,9 +115,9 @@ class TestCliTurnRoutePool:
         from agent.smart_model_routing import resolve_turn_route
         captured = {}
 
-        def spy_resolve(user_message, routing_config, primary):
+        def spy_resolve(user_message, routing_config, primary, **kwargs):
             captured["primary"] = primary
-            return resolve_turn_route(user_message, routing_config, primary)
+            return resolve_turn_route(user_message, routing_config, primary, **kwargs)
 
         monkeypatch.setattr(
             "agent.smart_model_routing.resolve_turn_route", spy_resolve
@@ -151,9 +151,9 @@ class TestGatewayTurnRoutePool:
         from agent.smart_model_routing import resolve_turn_route
         captured = {}
 
-        def spy_resolve(user_message, routing_config, primary):
+        def spy_resolve(user_message, routing_config, primary, **kwargs):
             captured["primary"] = primary
-            return resolve_turn_route(user_message, routing_config, primary)
+            return resolve_turn_route(user_message, routing_config, primary, **kwargs)
 
         monkeypatch.setattr(
             "agent.smart_model_routing.resolve_turn_route", spy_resolve
