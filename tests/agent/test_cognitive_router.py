@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from agent.cognitive_router import CognitiveRoute, resolve_cognitive_route
+from agent.cognitive_router import (
+    CognitiveRoute,
+    gate_cheap_route,
+    resolve_cognitive_route,
+)
 
 
 _BASE_CFG = {
@@ -175,3 +179,48 @@ def test_routing_reasons_includes_fast_signal():
     assert route is not None
     assert route.mode == "fast"
     assert any("simple" in r or "short" in r for r in route.routing_reasons)
+
+
+# ---- gate_cheap_route ------------------------------------------------------
+
+
+_SAMPLE_CHEAP_ROUTE = {
+    "provider": "openrouter",
+    "model": "google/gemini-2.5-flash",
+    "routing_reason": "simple_turn",
+}
+
+
+def _route(mode):
+    return resolve_cognitive_route(
+        user_message={
+            "fast": "hi there",
+            "deep": "上次的 root cause",
+        }.get(mode, "please help me draft a long thoughtful note " * 5),
+        conversation_history=None,
+        routing_config=_BASE_CFG,
+        agent_state=None,
+    )
+
+
+def test_gate_passes_through_when_no_cognition():
+    assert gate_cheap_route(None, _SAMPLE_CHEAP_ROUTE) == _SAMPLE_CHEAP_ROUTE
+    assert gate_cheap_route(None, None) is None
+
+
+def test_gate_allows_cheap_route_in_fast_mode():
+    fast = _route("fast")
+    assert fast.mode == "fast"
+    assert gate_cheap_route(fast, _SAMPLE_CHEAP_ROUTE) == _SAMPLE_CHEAP_ROUTE
+
+
+def test_gate_blocks_cheap_route_in_standard_mode():
+    standard = _route("standard")
+    assert standard.mode == "standard"
+    assert gate_cheap_route(standard, _SAMPLE_CHEAP_ROUTE) is None
+
+
+def test_gate_blocks_cheap_route_in_deep_mode():
+    deep = _route("deep")
+    assert deep.mode == "deep"
+    assert gate_cheap_route(deep, _SAMPLE_CHEAP_ROUTE) is None
