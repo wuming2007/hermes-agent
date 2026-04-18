@@ -182,6 +182,41 @@ class MemoryManager:
                 )
         return "\n\n".join(parts)
 
+    def prefetch_for_policy(
+        self,
+        query: str,
+        *,
+        layers,
+        session_id: str = "",
+    ) -> str:
+        """Layer-aware variant of :meth:`prefetch_all` (PR2).
+
+        Dispatches each provider's ``prefetch_layered(...)`` with the
+        requested ``layers`` tuple. Providers that haven't overridden the
+        method fall through to their legacy ``prefetch()`` automatically
+        thanks to the default implementation on :class:`MemoryProvider`, so
+        no provider needs to change for PR2 to land.
+
+        Same merge / non-fatal-error contract as :meth:`prefetch_all`:
+        empty / whitespace-only outputs are dropped, one provider raising
+        never blocks the others, results are joined with a blank line in
+        registration order.
+        """
+        parts = []
+        for provider in self._providers:
+            try:
+                result = provider.prefetch_layered(
+                    query, layers=layers, session_id=session_id
+                )
+                if result and result.strip():
+                    parts.append(result)
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' prefetch_layered failed (non-fatal): %s",
+                    provider.name, e,
+                )
+        return "\n\n".join(parts)
+
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn."""
         for provider in self._providers:
