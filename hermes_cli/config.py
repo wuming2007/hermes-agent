@@ -425,7 +425,30 @@ DEFAULT_CONFIG = {
         "max_simple_words": 28,
         "cheap_model": {},
     },
-    
+    # Per-turn cognitive routing scaffold (PR1).
+    # Disabled by default; when enabled, classifies each turn into
+    # fast/standard/deep and surfaces routing metadata for downstream layers.
+    "cognition": {
+        "enabled": False,
+        "default_mode": "standard",
+        "fast_mode": {
+            "max_chars": 160,
+            "max_words": 28,
+            "allow_urls": False,
+            "allow_code_blocks": False,
+        },
+        "deep_mode_triggers": {
+            "historical_questions": True,
+            "code_changes": True,
+            "risky_external_actions": True,
+            "architecture_decisions": True,
+        },
+        "consistency_guard": {
+            "enabled": True,
+            "deep_mode_only": True,
+        },
+    },
+
     # Auxiliary model config — provider:model for each side task.
     # Format: provider is the provider name, model is the model slug.
     # "auto" for provider = auto-detect best available provider.
@@ -2549,6 +2572,25 @@ _FALLBACK_COMMENT = """
 #   cheap_model:
 #     provider: openrouter
 #     model: google/gemini-2.5-flash
+#
+# ── Cognitive Routing ──────────────────────────────────────────────────
+# Per-turn fast/standard/deep classification scaffold. Disabled by
+# default; when enabled, only fast turns are eligible for cheap routing.
+#
+# cognition:
+#   enabled: true
+#   default_mode: standard
+#   fast_mode:
+#     max_chars: 160
+#     max_words: 28
+#   deep_mode_triggers:
+#     historical_questions: true
+#     code_changes: true
+#     risky_external_actions: true
+#     architecture_decisions: true
+#   consistency_guard:
+#     enabled: true
+#     deep_mode_only: true
 """
 
 
