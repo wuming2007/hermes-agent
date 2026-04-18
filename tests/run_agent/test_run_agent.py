@@ -4121,3 +4121,119 @@ class TestCognitionTurnMetadataSnapshot:
         assert meta["consistency_check"] is True
         # routing_reasons should explain *why* deep was chosen.
         assert any(":" in r for r in meta["routing_reasons"])
+
+
+# ===================================================================
+# Layered retrieval wire-through (PR2)
+# ===================================================================
+
+
+def _install_memory_manager_spy(agent):
+    """Replace agent._memory_manager with a spy that records both prefetch
+    paths so tests can assert which one the run loop chose."""
+    spy = MagicMock()
+    spy.prefetch_all = MagicMock(return_value="")
+    spy.prefetch_for_policy = MagicMock(return_value="")
+    # Other manager methods called during the turn must be no-ops.
+    spy.queue_prefetch_all = MagicMock()
+    spy.sync_all = MagicMock()
+    spy.on_turn_start = MagicMock()
+    spy.handle_tool_call = MagicMock(return_value="")
+    spy.has_tool = MagicMock(return_value=False)
+    spy.get_all_tool_names = MagicMock(return_value=set())
+    agent._memory_manager = spy
+    return spy
+
+
+class TestLayeredRetrievalPrefetch:
+    """PR2 wires the cognition route into the run loop's prefetch site:
+    when a route exists the manager's layered orchestration is called with
+    the policy's layers; otherwise the legacy prefetch_all path is used so
+    cognition-disabled behavior is bit-for-bit identical to pre-PR2."""
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+    def test_disabled_cognition_uses_legacy_prefetch_all(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = {"enabled": False}
+        spy = _install_memory_manager_spy(agent)
+
+        _run_one_turn(agent, "hello")
+
+        spy.prefetch_all.assert_called_once()
+        spy.prefetch_for_policy.assert_not_called()
+        # Query passed verbatim from the user message.
+        assert spy.prefetch_all.call_args.args[0] == "hello"
+
+    def test_fast_route_invokes_principles_only_layered_prefetch(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        spy = _install_memory_manager_spy(agent)
+
+        _run_one_turn(agent, "ping")
+
+        spy.prefetch_for_policy.assert_called_once()
+        spy.prefetch_all.assert_not_called()
+        kwargs = spy.prefetch_for_policy.call_args.kwargs
+        assert kwargs["layers"] == ("principles",)
+
+    def test_standard_route_invokes_principles_plus_semantic_layered_prefetch(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        spy = _install_memory_manager_spy(agent)
+
+        long_prompt = (
+            "Could you please help me draft a thoughtful and friendly multi-paragraph "
+            "note about our upcoming team picnic that covers food preferences, "
+            "accessibility needs, transportation options, weather contingencies, "
+            "and a few possible time slots so everyone can weigh in early?"
+        )
+        _run_one_turn(agent, long_prompt)
+
+        spy.prefetch_for_policy.assert_called_once()
+        spy.prefetch_all.assert_not_called()
+        assert spy.prefetch_for_policy.call_args.kwargs["layers"] == (
+            "principles", "semantic",
+        )
+
+    def test_deep_route_invokes_full_layered_prefetch(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        spy = _install_memory_manager_spy(agent)
+
+        _run_one_turn(agent, "上次的設計回顧")
+
+        spy.prefetch_for_policy.assert_called_once()
+        spy.prefetch_all.assert_not_called()
+        assert spy.prefetch_for_policy.call_args.kwargs["layers"] == (
+            "principles", "semantic", "episodic",
+        )
+
+    def test_layered_prefetch_failure_is_non_fatal(self, agent):
+        """A raising prefetch_for_policy must not break the turn — same
+        contract the legacy prefetch_all path already had."""
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        spy = _install_memory_manager_spy(agent)
+        spy.prefetch_for_policy.side_effect = RuntimeError("boom")
+
+        result = _run_one_turn(agent, "ping")
+        assert result["completed"] is True
+
+    def test_disabled_cognition_does_not_invoke_layered_path(self, agent):
+        """Belt-and-suspenders: even with the cognition_config attribute
+        missing entirely, only legacy prefetch_all is used."""
+        self._setup_agent(agent)
+        if hasattr(agent, "_cognition_config"):
+            agent._cognition_config = {}
+        spy = _install_memory_manager_spy(agent)
+
+        _run_one_turn(agent, "hi")
+
+        spy.prefetch_all.assert_called_once()
+        spy.prefetch_for_policy.assert_not_called()
