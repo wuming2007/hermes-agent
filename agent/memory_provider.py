@@ -103,6 +103,26 @@ class MemoryProvider(ABC):
         """
         return ""
 
+    def prefetch_layered(
+        self,
+        query: str,
+        *,
+        layers,
+        session_id: str = "",
+    ) -> str:
+        """Layer-aware recall for the upcoming turn (PR2).
+
+        ``layers`` is a tuple of strings drawn from ``("principles",
+        "semantic", "episodic")`` describing which memory layers the cognitive
+        router selected for this turn. Providers that understand layers should
+        override this and consult only the requested layers; providers that
+        don't can leave the default, which transparently delegates to the
+        legacy :meth:`prefetch`. This keeps PR2 backward-compatible — every
+        existing provider continues to work when the run loop starts using
+        the layered path.
+        """
+        return self.prefetch(query, session_id=session_id)
+
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Queue a background recall for the NEXT turn.
 
