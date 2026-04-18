@@ -3998,3 +3998,129 @@ class TestDeadRetryCode:
             f"Expected 2 occurrences of 'if retry_count >= max_retries:' "
             f"but found {occurrences}"
         )
+
+
+# ===================================================================
+# Cognitive routing (PR1)
+# ===================================================================
+
+
+_FAST_COGNITION_CFG = {
+    "enabled": True,
+    "default_mode": "standard",
+    "fast_mode": {
+        "max_chars": 160,
+        "max_words": 28,
+        "allow_urls": False,
+        "allow_code_blocks": False,
+    },
+    "deep_mode_triggers": {
+        "historical_questions": True,
+        "code_changes": True,
+        "risky_external_actions": True,
+        "architecture_decisions": True,
+    },
+    "consistency_guard": {"enabled": True, "deep_mode_only": True},
+}
+
+
+def _run_one_turn(agent, message: str):
+    """Drive run_conversation through a single stop response."""
+    resp = _mock_response(content="ok", finish_reason="stop")
+    agent.client.chat.completions.create.return_value = resp
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        return agent.run_conversation(message)
+
+
+class TestCognitiveRouting:
+    """Wire-through tests for the PR1 cognitive routing scaffold."""
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+    def test_disabled_cognition_leaves_route_none(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = {"enabled": False}
+        _run_one_turn(agent, "hello")
+        assert agent._current_cognitive_route is None
+        # Metadata should record disabled state without disturbing other code.
+        assert agent._current_turn_cognition_metadata.get("mode") in (None, "disabled")
+
+    def test_enabled_simple_prompt_routes_fast(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "what time is it in tokyo?")
+        route = agent._current_cognitive_route
+        assert route is not None
+        assert route.mode == "fast"
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "fast"
+        assert meta["allow_cheap_model"] is True
+        assert meta["consistency_check"] is False
+
+    def test_enabled_historical_prompt_routes_deep(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "上次我們討論的 root cause 是什麼？")
+        route = agent._current_cognitive_route
+        assert route is not None
+        assert route.mode == "deep"
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "deep"
+        assert meta["allow_cheap_model"] is False
+        assert meta["consistency_check"] is True
+
+    def test_route_metadata_includes_retrieval_plan(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "ping")
+        meta = agent._current_turn_cognition_metadata
+        assert meta["retrieval_plan"] == "principles_only"
+        assert meta["verification_plan"] == "none"
+
+    def test_route_metadata_for_standard_prompt(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        long_prompt = (
+            "Could you please help me draft a thoughtful and friendly multi-paragraph "
+            "note about our upcoming team picnic that covers food preferences, "
+            "accessibility needs, transportation options, weather contingencies, "
+            "and a few possible time slots so everyone can weigh in early?"
+        )
+        _run_one_turn(agent, long_prompt)
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "standard"
+        assert meta["retrieval_plan"] == "principles_plus_semantic"
+        assert meta["verification_plan"] == "light"
+
+    def test_route_metadata_for_deep_prompt(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "please refactor this module")
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "deep"
+        assert meta["retrieval_plan"] == "principles_plus_semantic_plus_episodic"
+        assert meta["verification_plan"] == "full"
+
+    def test_disabled_cognition_does_not_invalidate_system_prompt_cache(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = {"enabled": False}
+        cached_before = agent._cached_system_prompt
+        _run_one_turn(agent, "hello")
+        # PR1 must not change the system prompt as a side effect of routing.
+        assert agent._cached_system_prompt == cached_before
+
+    def test_enabled_cognition_does_not_invalidate_system_prompt_cache(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        cached_before = agent._cached_system_prompt
+        _run_one_turn(agent, "please refactor this module")
+        assert agent._cached_system_prompt == cached_before

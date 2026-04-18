@@ -1247,6 +1247,16 @@ class AIAgent:
             _agent_section = {}
         self._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
 
+        # Cognitive routing scaffold (PR1). Disabled by default; when enabled,
+        # each turn gets classified into fast/standard/deep with retrieval and
+        # verification metadata for downstream layers to consume.
+        _cognition_cfg = _agent_cfg.get("cognition", {})
+        if not isinstance(_cognition_cfg, dict):
+            _cognition_cfg = {}
+        self._cognition_config = _cognition_cfg
+        self._current_cognitive_route = None
+        self._current_turn_cognition_metadata: Dict[str, Any] = {}
+
         # Initialize context compressor for automatic context management
         # Compresses conversation when approaching model's context limit
         # Configuration via config.yaml (compression section)
@@ -5715,6 +5725,54 @@ class AIAgent:
             logging.error("Failed to activate fallback %s: %s", fb_model, e)
             return self._try_activate_fallback()  # try next in chain
 
+    # ── Per-turn cognitive routing (PR1) ────────────────────────────────
+
+    def _resolve_current_cognitive_route(
+        self,
+        original_user_message: Any,
+        messages: List[Dict[str, Any]],
+    ) -> None:
+        """Compute and store the cognitive route for the current turn.
+
+        No-op when cognition is disabled. Stores the resolved
+        ``CognitiveRoute`` (or ``None``) on ``self._current_cognitive_route``
+        and a flat ``dict`` snapshot on
+        ``self._current_turn_cognition_metadata`` for downstream layers
+        (telemetry, smart-model gating, layered retrieval) to consume.
+        """
+        from agent.cognitive_router import resolve_cognitive_route
+
+        cognition_cfg = self._cognition_config or {}
+        message_text = original_user_message if isinstance(original_user_message, str) else ""
+
+        try:
+            route = resolve_cognitive_route(
+                user_message=message_text,
+                conversation_history=messages,
+                routing_config=cognition_cfg,
+                agent_state={
+                    "platform": getattr(self, "platform", None),
+                    "model": getattr(self, "model", None),
+                    "provider": getattr(self, "provider", None),
+                },
+            )
+        except Exception as e:  # router must never break the run loop
+            logger.warning("cognitive_router failed; falling back to no route: %s", e)
+            route = None
+
+        self._current_cognitive_route = route
+        if route is None:
+            self._current_turn_cognition_metadata = {"mode": "disabled"}
+        else:
+            self._current_turn_cognition_metadata = {
+                "mode": route.mode,
+                "retrieval_plan": route.retrieval_plan,
+                "verification_plan": route.verification_plan,
+                "allow_cheap_model": route.allow_cheap_model,
+                "consistency_check": route.consistency_check,
+                "routing_reasons": list(route.routing_reasons),
+            }
+
     # ── Per-turn primary restoration ─────────────────────────────────────
 
     def _restore_primary_runtime(self) -> bool:
@@ -7864,6 +7922,15 @@ class AIAgent:
 
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
+
+        # ── Cognitive routing (PR1) ─────────────────────────────────────────
+        # Resolve route metadata before any prefetch / model selection so
+        # downstream layers can consume it. Disabled by default; when off,
+        # this stays a no-op and behavior matches pre-PR1 exactly.
+        self._resolve_current_cognitive_route(
+            original_user_message=original_user_message,
+            messages=messages,
+        )
 
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
