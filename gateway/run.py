@@ -547,6 +547,9 @@ class GatewayRunner:
         self._provider_routing = self._load_provider_routing()
         self._fallback_model = self._load_fallback_model()
         self._smart_model_routing = self._load_smart_model_routing()
+        # Cognitive routing scaffold (PR1). Disabled by default; when enabled,
+        # gates cheap routing behind per-turn fast/standard/deep classification.
+        self._cognition_config = self._load_cognition_config()
 
         # Wire process registry into session store for reset protection
         from tools.process_registry import process_registry
@@ -935,7 +938,33 @@ class GatewayRunner:
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
         }
-        route = resolve_turn_route(user_message, getattr(self, "_smart_model_routing", {}), primary)
+        # Compute the cognition route so cheap routing can be gated. Failure
+        # falls through to ``None`` → legacy heuristic-only behavior, matching
+        # the pre-PR1 contract when cognition is disabled.
+        cognition_route = None
+        _cog_cfg = getattr(self, "_cognition_config", None) or {}
+        if _cog_cfg:
+            try:
+                from agent.cognitive_router import resolve_cognitive_route
+
+                cognition_route = resolve_cognitive_route(
+                    user_message=user_message,
+                    conversation_history=None,
+                    routing_config=_cog_cfg,
+                    agent_state={
+                        "platform": "gateway",
+                        "model": primary.get("model"),
+                        "provider": primary.get("provider"),
+                    },
+                )
+            except Exception:
+                cognition_route = None
+        route = resolve_turn_route(
+            user_message,
+            getattr(self, "_smart_model_routing", {}),
+            primary,
+            cognition_route=cognition_route,
+        )
 
         service_tier = getattr(self, "_service_tier", None)
         if not service_tier:
@@ -1311,6 +1340,20 @@ class GatewayRunner:
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
                 return cfg.get("smart_model_routing", {}) or {}
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _load_cognition_config() -> dict:
+        """Load optional cognitive routing config (PR1, disabled by default)."""
+        try:
+            import yaml as _y
+            cfg_path = _hermes_home / "config.yaml"
+            if cfg_path.exists():
+                with open(cfg_path, encoding="utf-8") as _f:
+                    cfg = _y.safe_load(_f) or {}
+                return cfg.get("cognition", {}) or {}
         except Exception:
             pass
         return {}
