@@ -139,6 +139,21 @@ def test_cron_fast_cognition_allows_cheap_route(monkeypatch):
     assert result["model"] == "glm-5-air"
 
 
+def test_cron_helper_normalizes_malformed_sub_blocks():
+    """PR4: malformed sub-blocks (e.g. fast_mode as a string) must flow
+    through the shared loader without crashing the helper. Whether the
+    resolved route is None or a CognitiveRoute is acceptable — what
+    matters is that hand-edited bad config doesn't kill a scheduled job."""
+    cfg = {
+        "enabled": True,
+        "fast_mode": "broken",
+        "deep_mode_triggers": [1, 2, 3],
+        "consistency_guard": 42,
+    }
+    route = _resolve_cron_cognitive_route("ping", cfg)
+    assert route is None or isinstance(route, CognitiveRoute)
+
+
 def test_cron_deep_cognition_blocks_cheap_route(monkeypatch):
     monkeypatch.setattr(
         "hermes_cli.runtime_provider.resolve_runtime_provider",

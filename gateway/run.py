@@ -1346,17 +1346,14 @@ class GatewayRunner:
 
     @staticmethod
     def _load_cognition_config() -> dict:
-        """Load optional cognitive routing config (PR1, disabled by default)."""
-        try:
-            import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                with open(cfg_path, encoding="utf-8") as _f:
-                    cfg = _y.safe_load(_f) or {}
-                return cfg.get("cognition", {}) or {}
-        except Exception:
-            pass
-        return {}
+        """Load optional cognitive routing config (PR1, disabled by default).
+
+        Delegates to the shared PR4 loader so gateway / CLI / cron / AIAgent
+        all apply identical normalization (malformed sub-blocks → {}, etc.).
+        """
+        from agent.cognition_config import load_cognition_config_from_home
+
+        return load_cognition_config_from_home(_hermes_home)
 
     def _snapshot_running_agents(self) -> Dict[str, Any]:
         return {

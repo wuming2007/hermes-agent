@@ -1769,7 +1769,11 @@ class HermesCLI:
         self._smart_model_routing = CLI_CONFIG.get("smart_model_routing", {}) or {}
         # Cognitive routing scaffold (PR1). Disabled by default; when enabled,
         # gates cheap-routing behind per-turn fast/standard/deep classification.
-        self._cognition_config = CLI_CONFIG.get("cognition", {}) or {}
+        # Loaded via the shared PR4 helper so CLI / gateway / cron / AIAgent
+        # apply identical normalization (malformed sub-blocks → {}, etc.).
+        from agent.cognition_config import get_cognition_config as _get_cognition_config
+
+        self._cognition_config = _get_cognition_config(CLI_CONFIG)
         self._active_agent_route_signature = None
 
         # Agent will be initialized on first use

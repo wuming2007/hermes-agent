@@ -716,7 +716,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         smart_routing = _cfg.get("smart_model_routing", {}) or {}
         # Cognitive routing scaffold (PR1). Disabled by default; when enabled,
         # gates cheap routing behind per-turn fast/standard/deep classification.
-        cognition_cfg = _cfg.get("cognition", {}) or {}
+        # Loaded via the shared PR4 helper so cron / CLI / gateway / AIAgent
+        # apply identical normalization (malformed sub-blocks → {}, etc.).
+        from agent.cognition_config import get_cognition_config
+
+        cognition_cfg = get_cognition_config(_cfg)
 
         from hermes_cli.runtime_provider import (
             resolve_runtime_provider,
