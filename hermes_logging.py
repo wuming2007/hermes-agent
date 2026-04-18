@@ -227,6 +227,17 @@ def _install_macos_stderr_noise_filter() -> None:
 # from this point forward, even before setup_logging() is called.
 _install_session_record_factory()
 
+# Install the macOS stderr noise filter at import time (not at setup_logging()
+# call time) so any subprocess spawned before setup_logging() runs still has
+# fd 2 routed through our filter — e.g. sync_skills() in gateway/run.py runs
+# before setup_logging(), and any tool that captures stderr before the CLI
+# wires logging up would otherwise bypass suppression.
+#
+# Skipped under pytest: the test suite manages the install explicitly via
+# fixtures that set HERMES_DISABLE_STDERR_NOISE_FILTER and reset the sentinel.
+if "pytest" not in sys.modules:
+    _install_macos_stderr_noise_filter()
+
 
 # ---------------------------------------------------------------------------
 # Filters
