@@ -4124,3 +4124,68 @@ class TestCognitiveRouting:
         cached_before = agent._cached_system_prompt
         _run_one_turn(agent, "please refactor this module")
         assert agent._cached_system_prompt == cached_before
+
+
+class TestCognitionTurnMetadataSnapshot:
+    """The metadata snapshot must expose the full PR1 contract so downstream
+    layers (PR2 layered retrieval, PR3 consistency guard) can read it without
+    reaching into the router internals."""
+
+    _REQUIRED_KEYS = {
+        "mode",
+        "retrieval_plan",
+        "verification_plan",
+        "allow_cheap_model",
+        "consistency_check",
+        "routing_reasons",
+    }
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        agent._cognition_config = _FAST_COGNITION_CFG
+
+    def _drive(self, agent, message):
+        _run_one_turn(agent, message)
+        return agent._current_turn_cognition_metadata
+
+    def test_fast_metadata_snapshot(self, agent):
+        self._setup_agent(agent)
+        meta = self._drive(agent, "ping")
+        assert self._REQUIRED_KEYS.issubset(meta.keys())
+        assert meta["mode"] == "fast"
+        assert meta["retrieval_plan"] == "principles_only"
+        assert meta["verification_plan"] == "none"
+        assert meta["allow_cheap_model"] is True
+        assert meta["consistency_check"] is False
+        assert isinstance(meta["routing_reasons"], list)
+
+    def test_standard_metadata_snapshot(self, agent):
+        self._setup_agent(agent)
+        long_prompt = (
+            "Could you please help me draft a thoughtful and friendly multi-paragraph "
+            "note about our upcoming team picnic that covers food preferences, "
+            "accessibility needs, transportation options, weather contingencies, "
+            "and a few possible time slots so everyone can weigh in early?"
+        )
+        meta = self._drive(agent, long_prompt)
+        assert self._REQUIRED_KEYS.issubset(meta.keys())
+        assert meta["mode"] == "standard"
+        assert meta["retrieval_plan"] == "principles_plus_semantic"
+        assert meta["verification_plan"] == "light"
+        assert meta["allow_cheap_model"] is False
+
+    def test_deep_metadata_snapshot(self, agent):
+        self._setup_agent(agent)
+        meta = self._drive(agent, "上次的設計回顧")
+        assert self._REQUIRED_KEYS.issubset(meta.keys())
+        assert meta["mode"] == "deep"
+        assert meta["retrieval_plan"] == "principles_plus_semantic_plus_episodic"
+        assert meta["verification_plan"] == "full"
+        assert meta["allow_cheap_model"] is False
+        assert meta["consistency_check"] is True
+        # routing_reasons should explain *why* deep was chosen.
+        assert any(":" in r for r in meta["routing_reasons"])

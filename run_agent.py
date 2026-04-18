@@ -5764,6 +5764,9 @@ class AIAgent:
         if route is None:
             self._current_turn_cognition_metadata = {"mode": "disabled"}
         else:
+            # PR1 stores plan strings only; the layered-retrieval rewrite
+            # (PR2) will consume retrieval_plan / verification_plan to drive
+            # actual provider behavior.
             self._current_turn_cognition_metadata = {
                 "mode": route.mode,
                 "retrieval_plan": route.retrieval_plan,
