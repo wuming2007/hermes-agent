@@ -155,3 +155,160 @@ def run_light_consistency_check(
         changed=False,
         notes=tuple(notes),
     )
+
+
+# ---------------------------------------------------------------------------
+# Full guard: structured verifier call (mockable for tests)
+# ---------------------------------------------------------------------------
+
+
+VerifierCallable = Callable[[str], Any]
+"""Verifier signature: takes a verification prompt string, returns a dict
+with keys ``verdict`` (``"ok"`` or ``"revise"``), optional ``issues`` (list)
+and optional ``revised_response`` (str). Tests pass a fake; production wires
+in a thin wrapper around the auxiliary text client."""
+
+
+def _build_verification_prompt(
+    *,
+    candidate_response: str,
+    user_message: str,
+) -> str:
+    """Build a compact verifier prompt.
+
+    Kept short on purpose: the verifier must run cheaply enough not to
+    bloat ``deep`` mode latency. The prompt asks for a structured JSON
+    response so callers can parse it deterministically.
+    """
+    return (
+        "You are a strict consistency verifier. Compare the candidate "
+        "assistant response against the user's request. If the candidate "
+        "is acceptable, reply with JSON {\"verdict\":\"ok\"}. If it has a "
+        "concrete factual / logical / completeness problem, reply with JSON "
+        "{\"verdict\":\"revise\",\"issues\":[...],\"revised_response\":\"...\"}.\n\n"
+        f"User request:\n{user_message}\n\n"
+        f"Candidate response:\n{candidate_response}\n\n"
+        "Reply with JSON only."
+    )
+
+
+def _coerce_verifier_payload(payload: Any) -> Optional[dict]:
+    """Best-effort normalize verifier output into a dict, or return None."""
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str):
+        # Some auxiliary clients return raw JSON-ish strings; try to parse.
+        try:
+            parsed = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def run_full_consistency_check(
+    *,
+    candidate_response: str,
+    user_message: str,
+    verifier: VerifierCallable,
+) -> VerificationResult:
+    """Full guard — runs one verifier call that may rewrite the response.
+
+    ``verifier`` is injected so PR3 tests can drive the function without
+    spinning up an aux LLM. Production callers wire in
+    :func:`_default_verifier` or a similar thin wrapper. Failures of any
+    kind (verifier raises, returns garbage, returns ``revise`` without a
+    replacement) are non-fatal: the function falls back to the candidate
+    response with a descriptive note.
+    """
+    candidate = candidate_response or ""
+    notes: list[str] = []
+
+    if _is_blank(candidate):
+        notes.append("empty_response")
+        return VerificationResult(
+            applied=True,
+            plan="full",
+            original_response=candidate,
+            final_response=candidate,
+            changed=False,
+            notes=tuple(notes),
+        )
+
+    prompt = _build_verification_prompt(
+        candidate_response=candidate, user_message=user_message
+    )
+
+    try:
+        raw_payload = verifier(prompt)
+    except Exception as exc:
+        logger.warning("consistency_guard verifier raised (non-fatal): %s", exc)
+        notes.append(f"verifier_error:{type(exc).__name__}")
+        return VerificationResult(
+            applied=True,
+            plan="full",
+            original_response=candidate,
+            final_response=candidate,
+            changed=False,
+            notes=tuple(notes),
+        )
+
+    payload = _coerce_verifier_payload(raw_payload)
+    if payload is None:
+        notes.append("verifier_parse:not_a_dict")
+        return VerificationResult(
+            applied=True,
+            plan="full",
+            original_response=candidate,
+            final_response=candidate,
+            changed=False,
+            notes=tuple(notes),
+        )
+
+    verdict = str(payload.get("verdict", "")).strip().lower()
+    issues = payload.get("issues") or []
+    if isinstance(issues, list):
+        notes.extend(str(i) for i in issues if i)
+
+    if verdict == "ok":
+        return VerificationResult(
+            applied=True,
+            plan="full",
+            original_response=candidate,
+            final_response=candidate,
+            changed=False,
+            notes=tuple(notes),
+        )
+
+    if verdict == "revise":
+        revised = payload.get("revised_response")
+        if isinstance(revised, str) and revised.strip():
+            return VerificationResult(
+                applied=True,
+                plan="full",
+                original_response=candidate,
+                final_response=revised,
+                changed=True,
+                notes=tuple(notes),
+            )
+        notes.append("missing_revised_response")
+        return VerificationResult(
+            applied=True,
+            plan="full",
+            original_response=candidate,
+            final_response=candidate,
+            changed=False,
+            notes=tuple(notes),
+        )
+
+    # Unknown verdict — treat as parse failure, keep candidate.
+    notes.append(f"verifier_parse:unknown_verdict:{verdict or 'missing'}")
+    return VerificationResult(
+        applied=True,
+        plan="full",
+        original_response=candidate,
+        final_response=candidate,
+        changed=False,
+        notes=tuple(notes),
+    )
