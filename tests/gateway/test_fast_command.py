@@ -286,3 +286,60 @@ def test_gateway_cognition_deep_trigger_blocks_cheap_route(monkeypatch):
     assert result["model"] == "anthropic/claude-sonnet-4"
     assert result["runtime"]["provider"] == "openrouter"
     assert result["label"] is None
+
+
+# ---------------------------------------------------------------------------
+# Cognition config loading parity (PR4)
+# ---------------------------------------------------------------------------
+
+
+def test_gateway_load_cognition_config_uses_shared_helper(tmp_path, monkeypatch):
+    """gateway/run.py's _load_cognition_config must delegate to the
+    shared loader so all entry points share normalization semantics."""
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "cognition:\n  enabled: true\n  fast_mode:\n    max_chars: 99\n",
+        encoding="utf-8",
+    )
+    result = gateway_run.GatewayRunner._load_cognition_config()
+    assert result["enabled"] is True
+    assert result["fast_mode"]["max_chars"] == 99
+
+
+def test_gateway_load_cognition_config_normalizes_malformed_yaml(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "cognition:\n  enabled: true\n  fast_mode: broken_string\n  deep_mode_triggers: 42\n",
+        encoding="utf-8",
+    )
+    result = gateway_run.GatewayRunner._load_cognition_config()
+    # Malformed sub-blocks must be coerced to {} via the shared helper.
+    assert result["enabled"] is True
+    assert result["fast_mode"] == {}
+    assert result["deep_mode_triggers"] == {}
+
+
+def test_gateway_malformed_cognition_config_does_not_crash_routing(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_: {
+            "provider": "zai",
+            "api_mode": "chat_completions",
+            "base_url": "https://open.z.ai/api/v1",
+            "api_key": "cheap-key",
+            "source": "env/config",
+        },
+    )
+    runner = _make_runner_with_cheap_routing(
+        {
+            "enabled": True,
+            "fast_mode": "broken",
+            "deep_mode_triggers": [1, 2, 3],
+            "consistency_guard": 42,
+        }
+    )
+    # Routing must complete without raising on the malformed sub-blocks.
+    result = runner._resolve_turn_agent_config(
+        "ping", "anthropic/claude-sonnet-4", _PRIMARY_RUNTIME
+    )
+    assert "model" in result

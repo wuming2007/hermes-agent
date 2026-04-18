@@ -758,3 +758,61 @@ def test_cli_cognition_deep_mode_blocks_cheap_route_via_historical_trigger(monke
     assert result["model"] == "anthropic/claude-sonnet-4"
     assert result["runtime"]["provider"] == "openrouter"
     assert result["label"] is None
+
+
+# ---------------------------------------------------------------------------
+# Cognition config loading parity (PR4)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_malformed_cognition_config_does_not_crash(monkeypatch):
+    """Stale / malformed sub-blocks (e.g. fast_mode as a string) must
+    flow through the shared loader and become {}; the turn must keep
+    routing instead of throwing."""
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_: {
+            "provider": "zai",
+            "api_mode": "chat_completions",
+            "base_url": "https://open.z.ai/api/v1",
+            "api_key": "cheap-key",
+            "source": "env/config",
+        },
+    )
+    _, shell = _make_cli_with_smart_routing()
+    # User's hand-edited config has the right top-level shape but a
+    # non-dict sub-block — this must NOT raise.
+    shell._cognition_config = {
+        "enabled": True,
+        "fast_mode": "broken",
+        "deep_mode_triggers": [1, 2, 3],
+        "consistency_guard": 42,
+    }
+
+    result = shell._resolve_turn_agent_config("ping")
+
+    # Whatever the routing decision, the turn must complete without
+    # crashing on the malformed sub-blocks.
+    assert "model" in result
+
+
+def test_cli_loads_cognition_via_shared_helper(monkeypatch):
+    """HermesCLI.__init__ must obtain its cognition config through the
+    shared agent.cognition_config.get_cognition_config helper so all
+    entry points share normalization semantics."""
+    cli = _import_cli()
+    captured: dict = {}
+
+    def _spy(config):
+        captured["arg"] = config
+        return {"enabled": False}
+
+    monkeypatch.setattr("agent.cognition_config.get_cognition_config", _spy)
+    # Also patch the binding inside cli's module to be sure both
+    # import-styles route through the spy.
+    if hasattr(cli, "get_cognition_config"):
+        monkeypatch.setattr(cli, "get_cognition_config", _spy)
+
+    shell = cli.HermesCLI(model="gpt-5", compact=True, max_turns=1)
+    assert shell._cognition_config == {"enabled": False}
+    assert "arg" in captured

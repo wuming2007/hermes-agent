@@ -1256,10 +1256,11 @@ class AIAgent:
         # Cognitive routing scaffold (PR1). Disabled by default; when enabled,
         # each turn gets classified into fast/standard/deep with retrieval and
         # verification metadata for downstream layers to consume.
-        _cognition_cfg = _agent_cfg.get("cognition", {})
-        if not isinstance(_cognition_cfg, dict):
-            _cognition_cfg = {}
-        self._cognition_config = _cognition_cfg
+        # Loaded via the shared PR4 helper so AIAgent / CLI / gateway / cron
+        # apply identical normalization (malformed sub-blocks → {}, etc.).
+        from agent.cognition_config import get_cognition_config as _get_cognition_config
+
+        self._cognition_config = _get_cognition_config(_agent_cfg)
         self._current_cognitive_route = None
         self._current_turn_cognition_metadata: Dict[str, Any] = {}
 
