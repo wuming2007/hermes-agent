@@ -86,3 +86,72 @@ def should_run_consistency_guard(
     orthogonal hint individual guard implementations may consult.
     """
     return resolve_verification_plan(cognition_route) in ("light", "full")
+
+
+# ---------------------------------------------------------------------------
+# Light guard: rule-based local checks (no extra LLM call)
+# ---------------------------------------------------------------------------
+
+# Pairs of phrases that, when both appear in the same response, are almost
+# certainly contradicting each other. Kept deliberately small and concrete —
+# false positives are worse here than false negatives because the light
+# guard surfaces issues without auto-repairing.
+_CONTRADICTION_PAIRS: tuple[tuple[str, str], ...] = (
+    ("i've completed", "haven't started"),
+    ("i have completed", "haven't started"),
+    ("已完成", "尚未做"),
+    ("已完成", "還沒做"),
+    ("done", "not done yet"),
+)
+
+
+def _is_blank(text: str) -> bool:
+    return not text or not text.strip()
+
+
+def _detect_contradictions(text_lower: str) -> list[str]:
+    hits: list[str] = []
+    for left, right in _CONTRADICTION_PAIRS:
+        if left in text_lower and right in text_lower:
+            hits.append(f"contradiction:{left}/{right}")
+    return hits
+
+
+def run_light_consistency_check(
+    *,
+    candidate_response: str,
+    user_message: str,
+) -> VerificationResult:
+    """Rule-based light guard — surfaces issues without rewriting output.
+
+    PR3 contract: this function never makes an external call and never
+    rewrites the candidate response. It only attaches notes describing
+    detected issues so callers (and downstream telemetry) can see what
+    the guard noticed. Auto-repair is reserved for the full guard / a
+    later PR.
+    """
+    notes: list[str] = []
+    candidate = candidate_response or ""
+
+    if _is_blank(candidate):
+        notes.append("empty_response")
+        return VerificationResult(
+            applied=True,
+            plan="light",
+            original_response=candidate,
+            final_response=candidate,
+            changed=False,
+            notes=tuple(notes),
+        )
+
+    text_lower = candidate.lower()
+    notes.extend(_detect_contradictions(text_lower))
+
+    return VerificationResult(
+        applied=True,
+        plan="light",
+        original_response=candidate,
+        final_response=candidate,
+        changed=False,
+        notes=tuple(notes),
+    )
