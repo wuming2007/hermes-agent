@@ -62,12 +62,32 @@ class TestShouldRunConsistencyGuard:
         assert should_run_consistency_guard(_route(verification_plan="full")) is True
 
     def test_consistency_check_flag_alone_does_not_force_guard(self):
-        # PR3 contract: verification_plan is the source of truth for whether
-        # the guard runs. consistency_check is a separate orthogonal flag the
-        # guard implementation may consult, but it must NOT force a guard run
-        # on its own when verification_plan="none".
+        # PR4 contract (locked-in from PR3): verification_plan is the SINGLE
+        # source of truth for whether the guard runs. consistency_check is a
+        # non-execution hint that MUST NOT force a guard run on its own when
+        # verification_plan="none".
         r = _route(verification_plan="none", consistency_check=True)
         assert should_run_consistency_guard(r) is False
+
+    def test_full_plan_runs_guard_even_when_consistency_check_is_false(self):
+        # PR4 contract symmetry: consistency_check=False MUST NOT suppress
+        # a guard run when verification_plan asks for one. Future maintainers
+        # who try to use consistency_check as a kill-switch will trip this
+        # test and should re-read CognitiveRoute's contract docstring.
+        r = _route(verification_plan="full", consistency_check=False)
+        assert should_run_consistency_guard(r) is True
+
+    def test_light_plan_runs_guard_even_when_consistency_check_is_false(self):
+        r = _route(verification_plan="light", consistency_check=False)
+        assert should_run_consistency_guard(r) is True
+
+    def test_resolve_plan_does_not_consult_consistency_check(self):
+        # Same plan string + opposite consistency_check values must produce
+        # the same resolved plan — proves the resolver doesn't secretly
+        # branch on consistency_check.
+        a = _route(verification_plan="light", consistency_check=True)
+        b = _route(verification_plan="light", consistency_check=False)
+        assert resolve_verification_plan(a) == resolve_verification_plan(b)
 
 
 class TestVerificationResultDataclass:

@@ -64,6 +64,12 @@ def resolve_verification_plan(
 ) -> VerificationPlan:
     """Return the effective verification plan for the upcoming guard call.
 
+    PR4 contract: this is the **single source of truth** for guard
+    dispatch. The function reads ``cognition_route.verification_plan``
+    only — ``cognition_route.consistency_check`` is deliberately not
+    consulted here (or anywhere else in the dispatch path). See
+    :class:`agent.cognitive_router.CognitiveRoute` for the full contract.
+
     Returns ``"none"`` when the route is missing or the plan string is
     unrecognized so callers can short-circuit without a special case.
     """
@@ -80,10 +86,14 @@ def should_run_consistency_guard(
 ) -> bool:
     """Return True when ``verification_plan`` requires running the guard.
 
-    Note: ``cognition_route.consistency_check`` is intentionally ignored
-    here. PR3 treats ``verification_plan`` as the single source of truth
-    for whether the guard runs; ``consistency_check`` is a separate
-    orthogonal hint individual guard implementations may consult.
+    PR4 contract: ``verification_plan`` is the only signal consulted.
+    ``cognition_route.consistency_check`` is a non-execution hint
+    preserved in metadata for telemetry — it does NOT influence
+    dispatch. ``consistency_check=True`` while ``verification_plan="none"``
+    yields ``False``; ``consistency_check=False`` while
+    ``verification_plan="full"`` yields ``True``. This split keeps the
+    PR3 production behavior verbatim while making the contract explicit
+    so future maintainers do not silently re-couple the two fields.
     """
     return resolve_verification_plan(cognition_route) in ("light", "full")
 
