@@ -220,3 +220,24 @@ def resolve_cognitive_route(
         consistency_check=False,
         routing_reasons=fast_blockers,
     )
+
+
+def gate_cheap_route(
+    cognition_route: CognitiveRoute | None,
+    cheap_route: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Apply cognition gating to a candidate cheap route.
+
+    - When ``cognition_route`` is ``None`` (cognition disabled or not yet
+      consulted), pass the candidate through unchanged. This preserves
+      legacy behavior for callers that have not opted into cognition.
+    - When ``cognition_route.allow_cheap_model`` is ``True`` (only ``fast``
+      mode in PR1), pass the candidate through.
+    - Otherwise return ``None`` so the caller falls back to the primary
+      model.
+    """
+    if cognition_route is None:
+        return cheap_route
+    if cognition_route.allow_cheap_model:
+        return cheap_route
+    return None

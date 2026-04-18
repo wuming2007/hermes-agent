@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from utils import is_truthy_value
+
+if TYPE_CHECKING:  # pragma: no cover - type-only import
+    from agent.cognitive_router import CognitiveRoute
 
 _COMPLEX_KEYWORDS = {
     "debug",
@@ -59,11 +62,21 @@ def _coerce_int(value: Any, default: int) -> int:
         return default
 
 
-def choose_cheap_model_route(user_message: str, routing_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def choose_cheap_model_route(
+    user_message: str,
+    routing_config: Optional[Dict[str, Any]],
+    *,
+    cognition_route: Optional["CognitiveRoute"] = None,
+) -> Optional[Dict[str, Any]]:
     """Return the configured cheap-model route when a message looks simple.
 
     Conservative by design: if the message has signs of code/tool/debugging/
     long-form work, keep the primary model.
+
+    When ``cognition_route`` is provided (PR1 cognitive router opt-in), the
+    cheap route is gated behind it: only ``fast`` mode permits cheap routing.
+    Passing ``None`` preserves the legacy cheap-route-only heuristic for
+    callers that have not adopted cognitive routing yet.
     """
     cfg = routing_config or {}
     if not _coerce_bool(cfg.get("enabled"), False):
@@ -104,15 +117,32 @@ def choose_cheap_model_route(user_message: str, routing_config: Optional[Dict[st
     route["provider"] = provider
     route["model"] = model
     route["routing_reason"] = "simple_turn"
+
+    # Gate cheap routing behind the cognitive router when one is supplied.
+    if cognition_route is not None:
+        from agent.cognitive_router import gate_cheap_route
+
+        gated = gate_cheap_route(cognition_route, route)
+        if gated is None:
+            return None
+        return gated
     return route
 
 
-def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any]], primary: Dict[str, Any]) -> Dict[str, Any]:
+def resolve_turn_route(
+    user_message: str,
+    routing_config: Optional[Dict[str, Any]],
+    primary: Dict[str, Any],
+    *,
+    cognition_route: Optional["CognitiveRoute"] = None,
+) -> Dict[str, Any]:
     """Resolve the effective model/runtime for one turn.
 
-    Returns a dict with model/runtime/signature/label fields.
+    Returns a dict with model/runtime/signature/label fields. When
+    ``cognition_route`` is provided and disallows cheap routing, the primary
+    runtime is returned regardless of message-level heuristics.
     """
-    route = choose_cheap_model_route(user_message, routing_config)
+    route = choose_cheap_model_route(user_message, routing_config, cognition_route=cognition_route)
     if not route:
         return {
             "model": primary.get("model"),
