@@ -6,6 +6,7 @@ from agent.cognitive_router import CognitiveRoute
 from agent.consistency_guard import (
     VerificationResult,
     resolve_verification_plan,
+    run_light_consistency_check,
     should_run_consistency_guard,
 )
 
@@ -93,3 +94,78 @@ class TestVerificationResultDataclass:
         except dataclasses.FrozenInstanceError:
             return
         raise AssertionError("VerificationResult must be frozen")
+
+
+# ---------------------------------------------------------------------------
+# Task 2: light consistency check (rule-based)
+# ---------------------------------------------------------------------------
+
+
+class TestRunLightConsistencyCheck:
+    def test_normal_response_passes_through_unchanged(self):
+        result = run_light_consistency_check(
+            candidate_response="Sure — Tokyo is currently 3pm JST.",
+            user_message="what time is it in tokyo?",
+        )
+        assert result.applied is True
+        assert result.plan == "light"
+        assert result.changed is False
+        assert result.original_response == result.final_response
+        assert result.notes == ()
+
+    def test_empty_response_is_flagged(self):
+        result = run_light_consistency_check(
+            candidate_response="",
+            user_message="hello",
+        )
+        assert result.applied is True
+        assert result.changed is False
+        assert any("empty" in n.lower() for n in result.notes)
+
+    def test_whitespace_only_response_is_flagged(self):
+        result = run_light_consistency_check(
+            candidate_response="   \n  \t",
+            user_message="hello",
+        )
+        assert result.applied is True
+        assert any("empty" in n.lower() for n in result.notes)
+
+    def test_obvious_contradiction_pattern_is_flagged(self):
+        # Same response claims both completion and not-yet-doing, which the
+        # plan calls out explicitly as the kind of pattern light must catch.
+        candidate = "I've completed the refactor. Actually I haven't started yet."
+        result = run_light_consistency_check(
+            candidate_response=candidate,
+            user_message="did you finish?",
+        )
+        assert result.applied is True
+        assert any("contradict" in n.lower() for n in result.notes)
+
+    def test_chinese_contradiction_pattern_is_flagged(self):
+        candidate = "已完成所有測試。其實我尚未做任何事。"
+        result = run_light_consistency_check(
+            candidate_response=candidate,
+            user_message="完成了嗎？",
+        )
+        assert result.applied is True
+        assert any("contradict" in n.lower() for n in result.notes)
+
+    def test_light_does_not_rewrite_response_in_pr3(self):
+        # Plan: light is rule-based and surfaces issues but does not
+        # auto-repair in PR3 — that's reserved for full / future PRs.
+        result = run_light_consistency_check(
+            candidate_response="",
+            user_message="hello",
+        )
+        assert result.changed is False
+        assert result.final_response == ""
+
+    def test_normal_long_response_does_not_trip_short_check(self):
+        candidate = (
+            "Here are the three main considerations for your migration: "
+            "first, schema compatibility; second, downtime; third, rollback."
+        )
+        result = run_light_consistency_check(
+            candidate_response=candidate, user_message="migration plan?"
+        )
+        assert result.notes == ()
