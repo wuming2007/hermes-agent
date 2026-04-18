@@ -8126,11 +8126,26 @@ class AIAgent:
         # prefetch_all() on each tool call (10 tool calls = 10x latency + cost).
         # Use original_user_message (clean input) — user_message may contain
         # injected skill content that bloats / breaks provider queries.
+        #
+        # PR2: when the cognitive router has produced a route for this turn
+        # the prefetch goes through the layer-aware orchestration so the
+        # provider only consults the requested memory layers (principles /
+        # semantic / episodic). When no route exists (cognition disabled or
+        # router returned None) fall back to the legacy prefetch_all path so
+        # behavior is bit-for-bit identical to pre-PR2.
         _ext_prefetch_cache = ""
         if self._memory_manager:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
-                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                from agent.retrieval_policy import resolve_retrieval_policy
+
+                _policy = resolve_retrieval_policy(self._current_cognitive_route)
+                if _policy is not None:
+                    _ext_prefetch_cache = self._memory_manager.prefetch_for_policy(
+                        _query, layers=_policy.layers
+                    ) or ""
+                else:
+                    _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:
                 pass
 
