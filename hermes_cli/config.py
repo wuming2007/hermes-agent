@@ -430,7 +430,6 @@ DEFAULT_CONFIG = {
     # fast/standard/deep and surfaces routing metadata for downstream layers.
     "cognition": {
         "enabled": False,
-        "default_mode": "standard",
         "fast_mode": {
             "max_chars": 160,
             "max_words": 28,
@@ -2579,7 +2578,6 @@ _FALLBACK_COMMENT = """
 #
 # cognition:
 #   enabled: true
-#   default_mode: standard
 #   fast_mode:
 #     max_chars: 160
 #     max_words: 28

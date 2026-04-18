@@ -4007,7 +4007,6 @@ class TestDeadRetryCode:
 
 _FAST_COGNITION_CFG = {
     "enabled": True,
-    "default_mode": "standard",
     "fast_mode": {
         "max_chars": 160,
         "max_words": 28,

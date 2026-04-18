@@ -15,8 +15,10 @@ def test_cognition_disabled_by_default():
     assert DEFAULT_CONFIG["cognition"]["enabled"] is False
 
 
-def test_cognition_default_mode_is_standard():
-    assert DEFAULT_CONFIG["cognition"]["default_mode"] == "standard"
+def test_cognition_does_not_expose_unused_default_mode():
+    # default_mode was removed in PR1 because the router never read it; do
+    # not silently re-introduce a phantom setting.
+    assert "default_mode" not in DEFAULT_CONFIG["cognition"]
 
 
 def test_cognition_fast_mode_thresholds_present():

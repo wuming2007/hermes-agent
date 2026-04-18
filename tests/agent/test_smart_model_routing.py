@@ -53,7 +53,6 @@ def test_choose_cheap_model_route_allowed_in_fast_cognition_mode():
 
     cognition_cfg = {
         "enabled": True,
-        "default_mode": "standard",
         "fast_mode": {"max_chars": 160, "max_words": 28},
         "deep_mode_triggers": {
             "historical_questions": True,
