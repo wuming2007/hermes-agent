@@ -6,6 +6,7 @@ from agent.cognitive_router import CognitiveRoute
 from agent.consistency_guard import (
     VerificationResult,
     resolve_verification_plan,
+    run_full_consistency_check,
     run_light_consistency_check,
     should_run_consistency_guard,
 )
@@ -169,3 +170,109 @@ class TestRunLightConsistencyCheck:
             candidate_response=candidate, user_message="migration plan?"
         )
         assert result.notes == ()
+
+
+# ---------------------------------------------------------------------------
+# Task 3: full consistency check (mockable verifier call)
+# ---------------------------------------------------------------------------
+
+
+class TestRunFullConsistencyCheck:
+    def test_verdict_ok_keeps_original_response(self):
+        verifier = lambda prompt: {"verdict": "ok", "issues": []}
+        result = run_full_consistency_check(
+            candidate_response="Tokyo is 3pm.",
+            user_message="time in tokyo?",
+            verifier=verifier,
+        )
+        assert result.applied is True
+        assert result.plan == "full"
+        assert result.changed is False
+        assert result.final_response == "Tokyo is 3pm."
+
+    def test_verdict_revise_overrides_response(self):
+        verifier = lambda prompt: {
+            "verdict": "revise",
+            "issues": ["wrong timezone"],
+            "revised_response": "Tokyo is 3pm JST.",
+        }
+        result = run_full_consistency_check(
+            candidate_response="Tokyo is 3pm.",
+            user_message="time in tokyo?",
+            verifier=verifier,
+        )
+        assert result.applied is True
+        assert result.changed is True
+        assert result.final_response == "Tokyo is 3pm JST."
+        assert any("wrong timezone" in n for n in result.notes)
+
+    def test_revise_without_revised_response_keeps_original(self):
+        # If the verifier asks to revise but doesn't provide replacement
+        # text, we cannot safely rewrite — keep candidate, surface a note.
+        verifier = lambda prompt: {"verdict": "revise", "issues": ["incomplete"]}
+        result = run_full_consistency_check(
+            candidate_response="Half answer.",
+            user_message="full answer?",
+            verifier=verifier,
+        )
+        assert result.changed is False
+        assert result.final_response == "Half answer."
+        assert any("missing_revised_response" in n for n in result.notes)
+
+    def test_verifier_exception_falls_back_to_original(self):
+        def boom(prompt):
+            raise RuntimeError("verifier upstream timeout")
+
+        result = run_full_consistency_check(
+            candidate_response="Original answer",
+            user_message="?",
+            verifier=boom,
+        )
+        # Non-fatal: turn must complete with the candidate response.
+        assert result.applied is True  # still ran (and failed gracefully)
+        assert result.changed is False
+        assert result.final_response == "Original answer"
+        assert any("verifier_error" in n for n in result.notes)
+
+    def test_verifier_returns_garbage_falls_back(self):
+        verifier = lambda prompt: "not even a dict"
+        result = run_full_consistency_check(
+            candidate_response="Original",
+            user_message="?",
+            verifier=verifier,
+        )
+        assert result.changed is False
+        assert result.final_response == "Original"
+        assert any("verifier_parse" in n for n in result.notes)
+
+    def test_empty_candidate_short_circuits_without_verifier_call(self):
+        called = []
+
+        def verifier(prompt):
+            called.append(prompt)
+            return {"verdict": "ok"}
+
+        result = run_full_consistency_check(
+            candidate_response="",
+            user_message="?",
+            verifier=verifier,
+        )
+        # No point asking a verifier about an empty candidate.
+        assert called == []
+        assert result.changed is False
+        assert any("empty_response" in n for n in result.notes)
+
+    def test_revise_with_blank_revised_response_is_treated_as_missing(self):
+        verifier = lambda prompt: {
+            "verdict": "revise",
+            "revised_response": "   \n  ",
+            "issues": ["x"],
+        }
+        result = run_full_consistency_check(
+            candidate_response="Original",
+            user_message="?",
+            verifier=verifier,
+        )
+        assert result.changed is False
+        assert result.final_response == "Original"
+        assert any("missing_revised_response" in n for n in result.notes)
