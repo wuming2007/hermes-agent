@@ -572,6 +572,39 @@ def _build_job_prompt(job: dict) -> str:
     return "\n".join(parts)
 
 
+def _resolve_cron_cognitive_route(
+    user_message: str,
+    cognition_cfg: dict,
+    *,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+):
+    """Compute the cognitive route for a cron-driven turn (PR1 helper).
+
+    Returns ``None`` when cognition is disabled or the router fails so the
+    caller falls back to legacy smart_model_routing heuristics, preserving
+    pre-PR1 behavior verbatim. Extracted as a module-level function so the
+    routing decision can be unit-tested without spinning up a full job run.
+    """
+    if not cognition_cfg:
+        return None
+    try:
+        from agent.cognitive_router import resolve_cognitive_route
+
+        return resolve_cognitive_route(
+            user_message=user_message,
+            conversation_history=None,
+            routing_config=cognition_cfg,
+            agent_state={
+                "platform": "cron",
+                "model": model,
+                "provider": provider,
+            },
+        )
+    except Exception:
+        return None
+
+
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
@@ -679,6 +712,9 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Provider routing
         pr = _cfg.get("provider_routing", {})
         smart_routing = _cfg.get("smart_model_routing", {}) or {}
+        # Cognitive routing scaffold (PR1). Disabled by default; when enabled,
+        # gates cheap routing behind per-turn fast/standard/deep classification.
+        cognition_cfg = _cfg.get("cognition", {}) or {}
 
         from hermes_cli.runtime_provider import (
             resolve_runtime_provider,
@@ -696,6 +732,12 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             raise RuntimeError(message) from exc
 
         from agent.smart_model_routing import resolve_turn_route
+        cognition_route = _resolve_cron_cognitive_route(
+            prompt,
+            cognition_cfg,
+            model=model,
+            provider=runtime.get("provider"),
+        )
         turn_route = resolve_turn_route(
             prompt,
             smart_routing,
@@ -708,6 +750,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 "command": runtime.get("command"),
                 "args": list(runtime.get("args") or []),
             },
+            cognition_route=cognition_route,
         )
 
         fallback_model = _cfg.get("fallback_providers") or _cfg.get("fallback_model") or None
