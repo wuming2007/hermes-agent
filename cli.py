@@ -1767,6 +1767,9 @@ class HermesCLI:
 
         # Optional cheap-vs-strong routing for simple turns
         self._smart_model_routing = CLI_CONFIG.get("smart_model_routing", {}) or {}
+        # Cognitive routing scaffold (PR1). Disabled by default; when enabled,
+        # gates cheap-routing behind per-turn fast/standard/deep classification.
+        self._cognition_config = CLI_CONFIG.get("cognition", {}) or {}
         self._active_agent_route_signature = None
 
         # Agent will be initialized on first use
@@ -2771,6 +2774,28 @@ class HermesCLI:
         from agent.smart_model_routing import resolve_turn_route
         from hermes_cli.models import resolve_fast_mode_overrides
 
+        # Compute the cognition route so cheap routing can be gated. Failure
+        # falls through to ``None`` → legacy smart_model_routing heuristics
+        # only, preserving pre-PR1 behavior verbatim when cognition is off.
+        cognition_route = None
+        _cog_cfg = getattr(self, "_cognition_config", None) or {}
+        if _cog_cfg:
+            try:
+                from agent.cognitive_router import resolve_cognitive_route
+
+                cognition_route = resolve_cognitive_route(
+                    user_message=user_message,
+                    conversation_history=getattr(self, "conversation_history", None),
+                    routing_config=_cog_cfg,
+                    agent_state={
+                        "platform": "cli",
+                        "model": getattr(self, "model", None),
+                        "provider": getattr(self, "provider", None),
+                    },
+                )
+            except Exception:
+                cognition_route = None
+
         route = resolve_turn_route(
             user_message,
             self._smart_model_routing,
@@ -2784,6 +2809,7 @@ class HermesCLI:
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
             },
+            cognition_route=cognition_route,
         )
 
         service_tier = getattr(self, "service_tier", None)
