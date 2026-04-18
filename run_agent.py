@@ -76,6 +76,12 @@ from hermes_constants import OPENROUTER_BASE_URL
 
 # Agent internals extracted to agent/ package for modularity
 from agent.memory_manager import build_memory_context_block
+from agent.consistency_guard import (
+    resolve_verification_plan,
+    run_full_consistency_check,
+    run_light_consistency_check,
+    should_run_consistency_guard,
+)
 from agent.retry_utils import jittered_backoff
 from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
@@ -5776,6 +5782,29 @@ class AIAgent:
                 "routing_reasons": list(route.routing_reasons),
             }
 
+    def _default_consistency_verifier(self, prompt: str) -> str:
+        """Production verifier wrapper for the PR3 full consistency guard.
+
+        Calls the auxiliary text client (task ``"consistency_guard"`` with
+        auto-detect fallback) and returns the raw model output. The guard
+        layer parses the output as JSON; failures here are wrapped as
+        exceptions so the guard's non-fatal handling kicks in and the turn
+        falls back to the candidate response.
+        """
+        from agent.auxiliary_client import get_text_auxiliary_client
+
+        client, model = get_text_auxiliary_client(task="consistency_guard")
+        if client is None or not model:
+            raise RuntimeError("no auxiliary client available for consistency_guard")
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=2000,
+            timeout=30,
+        )
+        return (response.choices[0].message.content or "").strip()
+
     # ── Per-turn primary restoration ─────────────────────────────────────
 
     def _restore_primary_runtime(self) -> bool:
@@ -10550,6 +10579,66 @@ class AIAgent:
         
         # Determine if conversation completed successfully
         completed = final_response is not None and api_call_count < self.max_iterations
+
+        # ── Consistency guard / verification second pass (PR3) ───────────
+        # Post-generation guard. Runs only when the cognitive router asked
+        # for verification AND we have a non-empty candidate response. The
+        # guard never mutates the system prompt and is fully non-fatal: any
+        # exception falls through to the candidate response so a buggy
+        # verifier can never break a turn. When the guard rewrites the
+        # response we update both the returned ``final_response`` and the
+        # last assistant message in ``messages`` so persistence + hooks +
+        # caller all see the same revised text.
+        if final_response and not interrupted and should_run_consistency_guard(
+            self._current_cognitive_route
+        ):
+            try:
+                _plan = resolve_verification_plan(self._current_cognitive_route)
+                _user_msg_for_guard = (
+                    original_user_message if isinstance(original_user_message, str) else ""
+                )
+                if _plan == "light":
+                    _guard_result = run_light_consistency_check(
+                        candidate_response=final_response,
+                        user_message=_user_msg_for_guard,
+                    )
+                elif _plan == "full":
+                    _guard_result = run_full_consistency_check(
+                        candidate_response=final_response,
+                        user_message=_user_msg_for_guard,
+                        verifier=self._default_consistency_verifier,
+                    )
+                else:
+                    _guard_result = None
+
+                if _guard_result is not None:
+                    if _guard_result.changed and _guard_result.final_response:
+                        final_response = _guard_result.final_response
+                        # Mirror the revision into the last assistant message
+                        # so persistence, plugin hooks, and the returned
+                        # messages list all reflect what the user actually saw.
+                        for _m in reversed(messages):
+                            if _m.get("role") == "assistant" and not _m.get("tool_calls"):
+                                _m["content"] = _guard_result.final_response
+                                break
+                    if isinstance(self._current_turn_cognition_metadata, dict):
+                        self._current_turn_cognition_metadata["verification_applied"] = (
+                            _guard_result.applied
+                        )
+                        self._current_turn_cognition_metadata["verification_plan"] = (
+                            _guard_result.plan
+                        )
+                        self._current_turn_cognition_metadata["verification_changed"] = (
+                            _guard_result.changed
+                        )
+                        self._current_turn_cognition_metadata["verification_notes"] = list(
+                            _guard_result.notes
+                        )
+            except Exception as exc:
+                # Non-fatal: guard must never break the turn.
+                logger.warning(
+                    "consistency_guard wiring raised (non-fatal): %s", exc
+                )
 
         # Save trajectory if enabled
         self._save_trajectory(messages, user_message, completed)
