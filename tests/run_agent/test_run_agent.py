@@ -4427,3 +4427,32 @@ class TestConsistencyGuardWiring:
         ):
             _drive_simple_turn(agent, "上次的設計回顧")
         assert agent._cached_system_prompt == cached_before
+
+    def test_consistency_check_false_does_not_disable_full_guard_wiring(self, agent):
+        """PR4 contract pin at the integration layer: even when the route
+        the router emits has consistency_check=False, the wiring must
+        still dispatch the full guard because verification_plan="full"
+        is the only signal the dispatch layer reads. Real scenario:
+        deep mode triggered, but the user set
+        cognition.consistency_guard.enabled=false in their config — the
+        router emits CognitiveRoute(verification_plan="full",
+        consistency_check=False). PR4 says the guard must still run."""
+        self._setup_agent(agent)
+        cfg = dict(_FAST_COGNITION_CFG)
+        cfg["consistency_guard"] = {"enabled": False, "deep_mode_only": True}
+        agent._cognition_config = cfg
+        from agent.consistency_guard import VerificationResult
+        with patch(
+            "run_agent.run_full_consistency_check",
+            return_value=VerificationResult(
+                applied=True, plan="full",
+                original_response="candidate", final_response="candidate",
+                changed=False,
+            ),
+        ) as full:
+            _drive_simple_turn(agent, "上次的設計回顧")
+        # Even though the resolved route has consistency_check=False, the
+        # full guard MUST still have been called because verification_plan
+        # is "full".
+        assert agent._current_cognitive_route.consistency_check is False
+        full.assert_called_once()

@@ -39,12 +39,26 @@ class CognitiveRoute:
 
     Fields are intentionally generic and persona-neutral; private layers may
     inspect them but should not rename or repurpose them.
+
+    Production contract (PR4):
+
+    - ``verification_plan`` is the **single source of truth** for whether
+      the consistency guard runs and how aggressive it is. The guard
+      dispatch never reads any other field.
+    - ``consistency_check`` is a **non-execution hint** — it is preserved
+      in metadata for telemetry and potential future use, but it does
+      NOT participate in dispatch. Setting ``consistency_check=True``
+      while ``verification_plan="none"`` will not start a guard pass;
+      setting ``consistency_check=False`` while ``verification_plan="full"``
+      will not stop one.
     """
 
     mode: Mode
     retrieval_plan: RetrievalPlan
     verification_plan: VerificationPlan
     allow_cheap_model: bool
+    # Non-execution hint per PR4 contract — preserved in metadata for
+    # telemetry but ignored by the guard dispatch in agent/consistency_guard.
     consistency_check: bool
     routing_reasons: list[str] = field(default_factory=list)
 
