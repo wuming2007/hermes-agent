@@ -37,12 +37,28 @@ logger = logging.getLogger(__name__)
 
 
 VerificationPlan = Literal["none", "light", "full"]
+VerificationStage = Literal["self_correction", "fast_monitor", "slow_verifier"]
 
 _VALID_PLANS: frozenset[str] = frozenset({"none", "light", "full"})
 
 
 @dataclass(frozen=True)
+class VerificationLadderPlan:
+    """Deterministic PR6 ladder expansion for a route verification plan.
+
+    ``source_plan`` preserves the PR3/PR4 route-level contract
+    (``none/light/full``), while ``stages`` exposes the concrete ladder steps
+    future runtime/telemetry code can reason about.
+    """
+
+    enabled: bool
+    source_plan: VerificationPlan
+    stages: Tuple[VerificationStage, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class VerificationResult:
+
     """Result of running the consistency guard on a candidate response.
 
     ``applied`` distinguishes "guard ran" from "guard skipped". ``changed``
@@ -79,6 +95,27 @@ def resolve_verification_plan(
     if plan in _VALID_PLANS:
         return plan  # type: ignore[return-value]
     return "none"
+
+
+def resolve_verification_ladder(
+    cognition_route: Optional[CognitiveRoute],
+) -> VerificationLadderPlan:
+    """Expand the route-level verification plan into PR6 ladder stages."""
+
+    source_plan = resolve_verification_plan(cognition_route)
+    if source_plan == "light":
+        return VerificationLadderPlan(
+            enabled=True,
+            source_plan="light",
+            stages=("self_correction", "fast_monitor"),
+        )
+    if source_plan == "full":
+        return VerificationLadderPlan(
+            enabled=True,
+            source_plan="full",
+            stages=("self_correction", "fast_monitor", "slow_verifier"),
+        )
+    return VerificationLadderPlan(enabled=False, source_plan="none", stages=())
 
 
 def should_run_consistency_guard(

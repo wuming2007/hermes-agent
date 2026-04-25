@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from agent.cognitive_router import CognitiveRoute
 from agent.consistency_guard import (
+    VerificationLadderPlan,
     VerificationResult,
+    resolve_verification_ladder,
     resolve_verification_plan,
     run_full_consistency_check,
     run_light_consistency_check,
@@ -88,6 +90,49 @@ class TestShouldRunConsistencyGuard:
         a = _route(verification_plan="light", consistency_check=True)
         b = _route(verification_plan="light", consistency_check=False)
         assert resolve_verification_plan(a) == resolve_verification_plan(b)
+
+
+class TestResolveVerificationLadder:
+    def test_none_route_disables_ladder(self):
+        plan = resolve_verification_ladder(None)
+        assert isinstance(plan, VerificationLadderPlan)
+        assert plan.enabled is False
+        assert plan.source_plan == "none"
+        assert plan.stages == ()
+
+    def test_plan_none_disables_ladder(self):
+        plan = resolve_verification_ladder(_route(verification_plan="none"))
+        assert plan.enabled is False
+        assert plan.source_plan == "none"
+        assert plan.stages == ()
+
+    def test_unknown_plan_disables_ladder_safely(self):
+        plan = resolve_verification_ladder(_route(verification_plan="ultra"))
+        assert plan.enabled is False
+        assert plan.source_plan == "none"
+        assert plan.stages == ()
+
+    def test_light_plan_maps_to_self_correction_and_fast_monitor(self):
+        plan = resolve_verification_ladder(_route(verification_plan="light"))
+        assert plan.enabled is True
+        assert plan.source_plan == "light"
+        assert plan.stages == ("self_correction", "fast_monitor")
+
+    def test_full_plan_maps_to_complete_ladder(self):
+        plan = resolve_verification_ladder(_route(verification_plan="full"))
+        assert plan.enabled is True
+        assert plan.source_plan == "full"
+        assert plan.stages == ("self_correction", "fast_monitor", "slow_verifier")
+
+    def test_ladder_plan_is_frozen(self):
+        import dataclasses
+
+        plan = resolve_verification_ladder(_route(verification_plan="light"))
+        try:
+            plan.enabled = False  # type: ignore[misc]
+        except dataclasses.FrozenInstanceError:
+            return
+        raise AssertionError("VerificationLadderPlan must be frozen")
 
 
 class TestVerificationResultDataclass:
