@@ -77,6 +77,7 @@ from hermes_constants import OPENROUTER_BASE_URL
 # Agent internals extracted to agent/ package for modularity
 from agent.memory_manager import build_memory_context_block
 from agent.consistency_guard import (
+    resolve_verification_ladder,
     resolve_verification_plan,
     run_full_consistency_check,
     run_light_consistency_check,
@@ -10647,6 +10648,29 @@ class AIAgent:
         # response we update both the returned ``final_response`` and the
         # last assistant message in ``messages`` so persistence + hooks +
         # caller all see the same revised text.
+        _verification_ladder_plan = None
+        if final_response and not interrupted and self._current_cognitive_route is not None:
+            try:
+                _verification_ladder_plan = resolve_verification_ladder(
+                    self._current_cognitive_route
+                )
+                if isinstance(self._current_turn_cognition_metadata, dict):
+                    self._current_turn_cognition_metadata.update(
+                        {
+                            "verification_ladder_enabled": _verification_ladder_plan.enabled,
+                            "verification_ladder_source_plan": _verification_ladder_plan.source_plan,
+                            "verification_ladder_stages": list(
+                                _verification_ladder_plan.stages
+                            ),
+                            "verification_ladder_applied_stages": [],
+                        }
+                    )
+            except Exception as exc:
+                # Non-fatal: ladder metadata must never change turn behavior.
+                logger.warning(
+                    "verification_ladder metadata raised (non-fatal): %s", exc
+                )
+
         if final_response and not interrupted and should_run_consistency_guard(
             self._current_cognitive_route
         ):
@@ -10692,6 +10716,14 @@ class AIAgent:
                         self._current_turn_cognition_metadata["verification_notes"] = list(
                             _guard_result.notes
                         )
+                        if _verification_ladder_plan is not None:
+                            self._current_turn_cognition_metadata[
+                                "verification_ladder_applied_stages"
+                            ] = (
+                                list(_verification_ladder_plan.stages)
+                                if _guard_result.applied
+                                else []
+                            )
             except Exception as exc:
                 # Non-fatal: guard must never break the turn.
                 logger.warning(

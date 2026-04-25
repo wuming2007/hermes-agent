@@ -4412,6 +4412,11 @@ class TestConsistencyGuardWiring:
         # Fast mode -> verification_plan="none" -> no guard.
         light.assert_not_called()
         full.assert_not_called()
+        meta = agent._current_turn_cognition_metadata
+        assert meta.get("verification_ladder_enabled") is False
+        assert meta.get("verification_ladder_source_plan") == "none"
+        assert meta.get("verification_ladder_stages") == []
+        assert meta.get("verification_ladder_applied_stages") == []
 
     def test_standard_route_invokes_light_guard(self, agent):
         self._setup_agent(agent)
@@ -4437,6 +4442,17 @@ class TestConsistencyGuardWiring:
             _drive_simple_turn(agent, long_prompt)
         light.assert_called_once()
         full.assert_not_called()
+        meta = agent._current_turn_cognition_metadata
+        assert meta.get("verification_ladder_enabled") is True
+        assert meta.get("verification_ladder_source_plan") == "light"
+        assert meta.get("verification_ladder_stages") == [
+            "self_correction",
+            "fast_monitor",
+        ]
+        assert meta.get("verification_ladder_applied_stages") == [
+            "self_correction",
+            "fast_monitor",
+        ]
 
     def test_deep_route_invokes_full_guard(self, agent):
         self._setup_agent(agent)
@@ -4456,6 +4472,19 @@ class TestConsistencyGuardWiring:
             _drive_simple_turn(agent, "上次的設計回顧")
         full.assert_called_once()
         light.assert_not_called()
+        meta = agent._current_turn_cognition_metadata
+        assert meta.get("verification_ladder_enabled") is True
+        assert meta.get("verification_ladder_source_plan") == "full"
+        assert meta.get("verification_ladder_stages") == [
+            "self_correction",
+            "fast_monitor",
+            "slow_verifier",
+        ]
+        assert meta.get("verification_ladder_applied_stages") == [
+            "self_correction",
+            "fast_monitor",
+            "slow_verifier",
+        ]
 
     def test_full_guard_revise_overrides_final_response(self, agent):
         self._setup_agent(agent)
@@ -4504,6 +4533,30 @@ class TestConsistencyGuardWiring:
         assert result["completed"] is True
         # Candidate must survive the guard failure.
         assert result["final_response"] == "candidate"
+
+    def test_ladder_metadata_exception_does_not_skip_full_guard(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        from agent.consistency_guard import VerificationResult
+        with (
+            patch(
+                "run_agent.resolve_verification_ladder",
+                side_effect=RuntimeError("ladder planner exploded"),
+            ),
+            patch(
+                "run_agent.run_full_consistency_check",
+                return_value=VerificationResult(
+                    applied=True, plan="full",
+                    original_response="candidate", final_response="candidate",
+                    changed=False,
+                ),
+            ) as full,
+        ):
+            result = _drive_simple_turn(agent, "上次的設計回顧", content="candidate")
+        assert result["completed"] is True
+        assert result["final_response"] == "candidate"
+        full.assert_called_once()
+        assert "verification_ladder_enabled" not in agent._current_turn_cognition_metadata
 
     def test_turn_metadata_records_verification_outcome(self, agent):
         self._setup_agent(agent)
