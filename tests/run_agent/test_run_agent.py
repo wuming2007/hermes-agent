@@ -4109,6 +4109,60 @@ class TestCognitiveRouting:
         assert meta["retrieval_plan"] == "principles_plus_semantic_plus_episodic"
         assert meta["verification_plan"] == "full"
 
+    def test_uncertainty_policy_metadata_is_attached_when_enabled(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "ping")
+        meta = agent._current_turn_cognition_metadata
+        assert meta["uncertainty_confidence_band"] == "high"
+        assert meta["uncertainty_action"] == "answer"
+        assert meta["depth_escalated"] is False
+        assert meta["require_tool_evidence"] is False
+        assert meta["seek_human"] is False
+
+    def test_uncertainty_policy_escalates_fast_route_to_standard(self, agent):
+        self._setup_agent(agent)
+        cfg = {
+            **_FAST_COGNITION_CFG,
+            "deep_mode_triggers": {
+                **_FAST_COGNITION_CFG["deep_mode_triggers"],
+                "historical_questions": False,
+            },
+        }
+        agent._cognition_config = cfg
+        _run_one_turn(agent, "上次我們說了什麼？")
+        route = agent._current_cognitive_route
+        assert route is not None
+        assert route.mode == "standard"
+        meta = agent._current_turn_cognition_metadata
+        assert meta["original_mode"] == "fast"
+        assert meta["mode"] == "standard"
+        assert meta["uncertainty_action"] == "escalate_depth"
+        assert meta["depth_escalated"] is True
+        assert meta["target_mode"] == "standard"
+        assert "uncertainty_escalated:standard" in meta["routing_reasons"]
+
+    def test_uncertainty_policy_marks_risky_external_action_as_seek_human(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "please send the email now")
+        meta = agent._current_turn_cognition_metadata
+        assert meta["uncertainty_confidence_band"] == "low"
+        assert meta["uncertainty_action"] == "seek_human"
+        assert meta["require_tool_evidence"] is True
+        assert meta["seek_human"] is True
+
+    def test_uncertainty_policy_can_be_disabled_without_metadata(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = {
+            **_FAST_COGNITION_CFG,
+            "uncertainty_policy": {"enabled": False},
+        }
+        _run_one_turn(agent, "ping")
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "fast"
+        assert "uncertainty_action" not in meta
+
     def test_disabled_cognition_does_not_invalidate_system_prompt_cache(self, agent):
         self._setup_agent(agent)
         agent._cognition_config = {"enabled": False}
