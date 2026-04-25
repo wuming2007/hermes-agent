@@ -76,6 +76,7 @@ from hermes_constants import OPENROUTER_BASE_URL
 
 # Agent internals extracted to agent/ package for modularity
 from agent.memory_manager import build_memory_context_block
+from agent.cognition_trace import build_cognition_turn_trace
 from agent.consistency_guard import (
     resolve_verification_ladder,
     resolve_verification_plan,
@@ -10730,6 +10731,23 @@ class AIAgent:
                     "consistency_guard wiring raised (non-fatal): %s", exc
                 )
 
+        # ── Cognition turn trace snapshot (PR7) ──────────────────────────
+        # Build a stable nested trace after routing/uncertainty/verification
+        # metadata has settled. This is downstream telemetry plumbing only:
+        # failures must never change the final response or break the turn.
+        _cognition_trace = None
+        try:
+            _cognition_trace = build_cognition_turn_trace(
+                self._current_turn_cognition_metadata
+            )
+            if isinstance(self._current_turn_cognition_metadata, dict):
+                self._current_turn_cognition_metadata["cognition_trace"] = _cognition_trace
+        except Exception as exc:
+            logger.warning(
+                "cognition_trace builder raised (non-fatal): %s", exc
+            )
+            _cognition_trace = None
+
         # Save trajectory if enabled
         self._save_trajectory(messages, user_message, completed)
 
@@ -10834,6 +10852,7 @@ class AIAgent:
             "estimated_cost_usd": self.session_estimated_cost_usd,
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
+            "cognition_trace": _cognition_trace,
         }
         self._response_was_previewed = False
         

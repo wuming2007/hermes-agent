@@ -4048,10 +4048,12 @@ class TestCognitiveRouting:
     def test_disabled_cognition_leaves_route_none(self, agent):
         self._setup_agent(agent)
         agent._cognition_config = {"enabled": False}
-        _run_one_turn(agent, "hello")
+        result = _run_one_turn(agent, "hello")
         assert agent._current_cognitive_route is None
         # Metadata should record disabled state without disturbing other code.
         assert agent._current_turn_cognition_metadata.get("mode") in (None, "disabled")
+        assert result["cognition_trace"]["enabled"] is False
+        assert result["cognition_trace"]["route"]["mode"] == "disabled"
 
     def test_enabled_simple_prompt_routes_fast(self, agent):
         self._setup_agent(agent)
@@ -4141,6 +4143,12 @@ class TestCognitiveRouting:
         assert meta["depth_escalated"] is True
         assert meta["target_mode"] == "standard"
         assert "uncertainty_escalated:standard" in meta["routing_reasons"]
+        trace = meta["cognition_trace"]
+        assert trace["route"]["mode"] == "standard"
+        assert trace["route"]["original_mode"] == "fast"
+        assert trace["uncertainty"]["present"] is True
+        assert trace["uncertainty"]["action"] == "escalate_depth"
+        assert trace["uncertainty"]["depth_escalated"] is True
 
     def test_uncertainty_policy_marks_risky_external_action_as_seek_human(self, agent):
         self._setup_agent(agent)
@@ -4453,6 +4461,14 @@ class TestConsistencyGuardWiring:
             "self_correction",
             "fast_monitor",
         ]
+        trace = meta.get("cognition_trace")
+        assert trace["route"]["mode"] == "standard"
+        assert trace["verification"]["ladder_enabled"] is True
+        assert trace["verification"]["ladder_source_plan"] == "light"
+        assert trace["verification"]["ladder_applied_stages"] == [
+            "self_correction",
+            "fast_monitor",
+        ]
 
     def test_deep_route_invokes_full_guard(self, agent):
         self._setup_agent(agent)
@@ -4557,6 +4573,19 @@ class TestConsistencyGuardWiring:
         assert result["final_response"] == "candidate"
         full.assert_called_once()
         assert "verification_ladder_enabled" not in agent._current_turn_cognition_metadata
+
+    def test_cognition_trace_builder_exception_is_non_fatal(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        with patch(
+            "run_agent.build_cognition_turn_trace",
+            side_effect=RuntimeError("trace builder exploded"),
+        ):
+            result = _drive_simple_turn(agent, "ping", content="candidate")
+        assert result["completed"] is True
+        assert result["final_response"] == "candidate"
+        assert result["cognition_trace"] is None
+        assert "cognition_trace" not in agent._current_turn_cognition_metadata
 
     def test_turn_metadata_records_verification_outcome(self, agent):
         self._setup_agent(agent)
