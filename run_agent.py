@@ -2598,7 +2598,12 @@ class AIAgent:
             return
         
         trajectory = self._convert_to_trajectory_format(messages, user_query, completed)
-        _save_trajectory_to_file(trajectory, self.model, completed)
+        metadata = None
+        if isinstance(self._current_turn_cognition_metadata, dict):
+            cognition_trace = self._current_turn_cognition_metadata.get("cognition_trace")
+            if cognition_trace is not None:
+                metadata = {"cognition_trace": cognition_trace}
+        _save_trajectory_to_file(trajectory, self.model, completed, metadata=metadata)
     
     @staticmethod
     def _summarize_api_error(error: Exception) -> str:

@@ -4035,6 +4035,70 @@ def _run_one_turn(agent, message: str):
         return agent.run_conversation(message)
 
 
+class TestCognitionTraceTrajectoryExport:
+    """PR8: export cognition_trace into trajectory JSONL metadata."""
+
+    def test_save_trajectory_passes_cognition_trace_metadata(self, agent):
+        agent.save_trajectories = True
+        trace = {
+            "schema_version": 1,
+            "enabled": True,
+            "route": {"mode": "standard"},
+            "uncertainty": {"present": False},
+            "verification": {"ladder_enabled": True},
+        }
+        agent._current_turn_cognition_metadata = {"cognition_trace": trace}
+        trajectory = [{"from": "human", "value": "hello"}]
+
+        with (
+            patch.object(
+                agent,
+                "_convert_to_trajectory_format",
+                return_value=trajectory,
+            ) as convert,
+            patch("run_agent._save_trajectory_to_file") as save,
+        ):
+            agent._save_trajectory(
+                [{"role": "user", "content": "hello"}],
+                "hello",
+                True,
+            )
+
+        convert.assert_called_once()
+        save.assert_called_once_with(
+            trajectory,
+            agent.model,
+            True,
+            metadata={"cognition_trace": trace},
+        )
+
+    def test_save_trajectory_omits_metadata_without_cognition_trace(self, agent):
+        agent.save_trajectories = True
+        agent._current_turn_cognition_metadata = {"mode": "disabled"}
+        trajectory = [{"from": "human", "value": "hello"}]
+
+        with (
+            patch.object(
+                agent,
+                "_convert_to_trajectory_format",
+                return_value=trajectory,
+            ),
+            patch("run_agent._save_trajectory_to_file") as save,
+        ):
+            agent._save_trajectory(
+                [{"role": "user", "content": "hello"}],
+                "hello",
+                True,
+            )
+
+        save.assert_called_once_with(
+            trajectory,
+            agent.model,
+            True,
+            metadata=None,
+        )
+
+
 class TestCognitiveRouting:
     """Wire-through tests for the PR1 cognitive routing scaffold."""
 
