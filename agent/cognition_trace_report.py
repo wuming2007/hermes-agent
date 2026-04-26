@@ -44,6 +44,11 @@ def empty_cognition_trace_report(files: Sequence[str] | None = None) -> dict[str
             "allow_cheap_model": _bool_buckets(),
             "consistency_check": _bool_buckets(),
         },
+        "interaction": {
+            "dialogue_modes": {},
+            "answer_densities": {},
+            "stance_reasons": {},
+        },
         "uncertainty": {
             "present": _bool_buckets(),
             "confidence_bands": {},
@@ -117,6 +122,13 @@ def _analyze_trace(report: dict[str, Any], trace: Mapping[str, Any]) -> None:
         _increment_bool(route_report["allow_cheap_model"], route.get("allow_cheap_model"))
         _increment_bool(route_report["consistency_check"], route.get("consistency_check"))
 
+    interaction = trace.get("interaction")
+    if isinstance(interaction, Mapping):
+        interaction_report = report["interaction"]
+        _increment_scalar(interaction_report["dialogue_modes"], interaction.get("dialogue_mode"))
+        _increment_scalar(interaction_report["answer_densities"], interaction.get("answer_density"))
+        _increment_list(interaction_report["stance_reasons"], interaction.get("stance_reasons"))
+
     uncertainty = trace.get("uncertainty")
     if isinstance(uncertainty, Mapping):
         uncertainty_report = report["uncertainty"]
@@ -147,7 +159,7 @@ def _counter_dict(counter: Mapping[str, int]) -> dict[str, int]:
 
 
 def _sort_counter_sections(report: dict[str, Any]) -> dict[str, Any]:
-    for section in ("route", "uncertainty", "verification"):
+    for section in ("route", "interaction", "uncertainty", "verification"):
         for key, value in list(report[section].items()):
             if isinstance(value, Counter):
                 report[section][key] = _counter_dict(value)
@@ -169,6 +181,7 @@ def analyze_cognition_trace_entries(
     report["cognition_trace"]["schema_versions"] = Counter()
     for section, keys in {
         "route": ("modes", "original_modes", "retrieval_plans", "verification_plans"),
+        "interaction": ("dialogue_modes", "answer_densities", "stance_reasons"),
         "uncertainty": ("confidence_bands", "actions", "target_modes"),
         "verification": ("ladder_source_plans", "ladder_stages", "ladder_applied_stages"),
     }.items():

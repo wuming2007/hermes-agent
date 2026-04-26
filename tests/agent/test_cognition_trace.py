@@ -12,6 +12,11 @@ def test_none_metadata_builds_disabled_trace():
     assert trace["enabled"] is False
     assert trace["route"]["mode"] == "disabled"
     assert trace["uncertainty"]["present"] is False
+    assert trace["interaction"] == {
+        "dialogue_mode": "query",
+        "answer_density": "standard",
+        "stance_reasons": [],
+    }
     assert trace["verification"]["ladder_enabled"] is False
 
 
@@ -53,6 +58,23 @@ def test_route_metadata_is_normalized():
         "allow_cheap_model": False,
         "consistency_check": True,
         "routing_reasons": ["semantic_needed", "standard_mode"],
+    }
+
+
+def test_interaction_metadata_is_grouped():
+    trace = build_cognition_turn_trace(
+        {
+            "mode": "fast",
+            "dialogue_mode": "status",
+            "answer_density": "brief",
+            "stance_reasons": ("status:目前", "route:fast"),
+        }
+    )
+
+    assert trace["interaction"] == {
+        "dialogue_mode": "status",
+        "answer_density": "brief",
+        "stance_reasons": ["status:目前", "route:fast"],
     }
 
 
@@ -130,12 +152,14 @@ def test_scalar_reason_values_are_coerced_to_string_lists():
             "mode": "standard",
             "routing_reasons": "single_reason",
             "uncertainty_reasons": "uncertain",
+            "stance_reasons": "status:狀態",
             "verification_notes": "checked",
         }
     )
 
     assert trace["route"]["routing_reasons"] == ["single_reason"]
     assert trace["uncertainty"]["reasons"] == ["uncertain"]
+    assert trace["interaction"]["stance_reasons"] == ["status:狀態"]
     assert trace["verification"]["notes"] == ["checked"]
 
 

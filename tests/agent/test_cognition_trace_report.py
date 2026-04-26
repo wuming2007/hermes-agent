@@ -29,6 +29,11 @@ def _trace(**overrides):
             "allow_cheap_model": False,
             "consistency_check": True,
         },
+        "interaction": {
+            "dialogue_mode": "status",
+            "answer_density": "brief",
+            "stance_reasons": ["status:目前", "route:fast"],
+        },
         "uncertainty": {
             "present": True,
             "confidence_band": "low",
@@ -62,6 +67,11 @@ def test_empty_report_has_stable_zero_shape():
     assert report["cognition_trace"]["missing"] == 0
     assert report["cognition_trace"]["malformed"] == 0
     assert report["route"]["modes"] == {}
+    assert report["interaction"] == {
+        "dialogue_modes": {},
+        "answer_densities": {},
+        "stance_reasons": {},
+    }
     assert report["errors"] == {"malformed_jsonl": 0, "missing_files": 0}
 
 
@@ -101,6 +111,10 @@ def test_analyze_entries_counts_route_uncertainty_and_verification():
     assert report["route"]["verification_plans"] == {"light": 1}
     assert report["route"]["allow_cheap_model"] == {"true": 0, "false": 1, "missing": 1}
     assert report["route"]["consistency_check"] == {"true": 1, "false": 0, "missing": 1}
+
+    assert report["interaction"]["dialogue_modes"] == {"status": 2}
+    assert report["interaction"]["answer_densities"] == {"brief": 2}
+    assert report["interaction"]["stance_reasons"] == {"route:fast": 2, "status:目前": 2}
 
     assert report["uncertainty"]["present"] == {"true": 1, "false": 1, "missing": 0}
     assert report["uncertainty"]["confidence_bands"] == {"low": 1}

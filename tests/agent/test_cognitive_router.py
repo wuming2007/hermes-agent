@@ -60,6 +60,9 @@ def test_fast_route_for_short_simple_prompt():
     assert route.verification_plan == "none"
     assert route.allow_cheap_model is True
     assert route.consistency_check is False
+    assert route.dialogue_mode == "query"
+    assert route.answer_density == "brief"
+    assert route.stance_reasons
     assert route.routing_reasons  # populated
 
 
@@ -178,6 +181,27 @@ def test_routing_reasons_includes_fast_signal():
     assert route is not None
     assert route.mode == "fast"
     assert any("simple" in r or "short" in r for r in route.routing_reasons)
+
+
+def test_route_detects_status_stance():
+    route = _resolve("目前 cognition stack 狀態如何？")
+    assert route is not None
+    assert route.dialogue_mode == "status"
+    assert route.answer_density == "brief"
+    assert any(reason.startswith("status:") for reason in route.stance_reasons)
+
+
+def test_cognitive_route_constructor_keeps_old_call_shape():
+    route = CognitiveRoute(
+        mode="fast",
+        retrieval_plan="principles_only",
+        verification_plan="none",
+        allow_cheap_model=True,
+        consistency_check=False,
+    )
+    assert route.dialogue_mode == "query"
+    assert route.answer_density == "standard"
+    assert route.stance_reasons == []
 
 
 # ---- gate_cheap_route ------------------------------------------------------

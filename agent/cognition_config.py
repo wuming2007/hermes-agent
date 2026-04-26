@@ -47,6 +47,7 @@ _RECOGNIZED_SUB_BLOCKS: tuple[str, ...] = (
     "fast_mode",
     "deep_mode_triggers",
     "consistency_guard",
+    "interaction_stance",
 )
 
 

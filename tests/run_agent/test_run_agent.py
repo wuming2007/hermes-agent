@@ -4263,6 +4263,9 @@ class TestCognitionTurnMetadataSnapshot:
         "allow_cheap_model",
         "consistency_check",
         "routing_reasons",
+        "dialogue_mode",
+        "answer_density",
+        "stance_reasons",
     }
 
     def _setup_agent(self, agent):
@@ -4287,6 +4290,9 @@ class TestCognitionTurnMetadataSnapshot:
         assert meta["allow_cheap_model"] is True
         assert meta["consistency_check"] is False
         assert isinstance(meta["routing_reasons"], list)
+        assert meta["dialogue_mode"] == "query"
+        assert meta["answer_density"] == "brief"
+        assert isinstance(meta["stance_reasons"], list)
 
     def test_standard_metadata_snapshot(self, agent):
         self._setup_agent(agent)
@@ -4302,6 +4308,8 @@ class TestCognitionTurnMetadataSnapshot:
         assert meta["retrieval_plan"] == "principles_plus_semantic"
         assert meta["verification_plan"] == "light"
         assert meta["allow_cheap_model"] is False
+        assert meta["dialogue_mode"] == "query"
+        assert meta["answer_density"] == "standard"
 
     def test_deep_metadata_snapshot(self, agent):
         self._setup_agent(agent)
@@ -4312,8 +4320,20 @@ class TestCognitionTurnMetadataSnapshot:
         assert meta["verification_plan"] == "full"
         assert meta["allow_cheap_model"] is False
         assert meta["consistency_check"] is True
+        assert meta["dialogue_mode"] == "query"
+        assert meta["answer_density"] == "standard"
         # routing_reasons should explain *why* deep was chosen.
         assert any(":" in r for r in meta["routing_reasons"])
+
+    def test_status_prompt_metadata_snapshot(self, agent):
+        self._setup_agent(agent)
+        meta = self._drive(agent, "目前 cognition stack 狀態如何？")
+        assert self._REQUIRED_KEYS.issubset(meta.keys())
+        assert meta["dialogue_mode"] == "status"
+        assert meta["answer_density"] == "brief"
+        assert any(reason.startswith("status:") for reason in meta["stance_reasons"])
+        assert meta["cognition_trace"]["interaction"]["dialogue_mode"] == "status"
+        assert meta["cognition_trace"]["interaction"]["answer_density"] == "brief"
 
 
 # ===================================================================

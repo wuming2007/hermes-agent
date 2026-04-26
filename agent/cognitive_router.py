@@ -31,6 +31,8 @@ RetrievalPlan = Literal[
     "principles_plus_semantic_plus_episodic",
 ]
 VerificationPlan = Literal["none", "light", "full"]
+DialogueMode = Literal["query", "status", "exploration", "debate", "execution"]
+AnswerDensity = Literal["brief", "standard", "expanded"]
 
 
 @dataclass
@@ -61,6 +63,9 @@ class CognitiveRoute:
     # telemetry but ignored by the guard dispatch in agent/consistency_guard.
     consistency_check: bool
     routing_reasons: list[str] = field(default_factory=list)
+    dialogue_mode: DialogueMode = "query"
+    answer_density: AnswerDensity = "standard"
+    stance_reasons: list[str] = field(default_factory=list)
 
 
 # Keyword sets per deep-mode trigger category. Mixed-language entries cover the
@@ -158,7 +163,7 @@ def resolve_cognitive_route(
         return None
 
     # ``conversation_history`` / ``agent_state`` reserved for future PRs.
-    del conversation_history, agent_state
+    del conversation_history
 
     text = (user_message or "").strip()
     text_lower = text.lower()
@@ -178,7 +183,7 @@ def resolve_cognitive_route(
 
     if deep_reasons:
         consistency_check = _coerce_bool(consistency_cfg.get("enabled"), True)
-        return CognitiveRoute(
+        route = CognitiveRoute(
             mode="deep",
             retrieval_plan="principles_plus_semantic_plus_episodic",
             verification_plan="full",
@@ -186,17 +191,29 @@ def resolve_cognitive_route(
             consistency_check=consistency_check,
             routing_reasons=deep_reasons,
         )
+        return _apply_interaction_stance(
+            route,
+            user_message=text,
+            routing_config=cfg,
+            agent_state=agent_state,
+        )
 
     # 2. Empty / whitespace-only message: standard is the safe default; cheap
     # routing on an empty message is meaningless.
     if not text:
-        return CognitiveRoute(
+        route = CognitiveRoute(
             mode="standard",
             retrieval_plan="principles_plus_semantic",
             verification_plan="light",
             allow_cheap_model=False,
             consistency_check=False,
             routing_reasons=["empty_message"],
+        )
+        return _apply_interaction_stance(
+            route,
+            user_message=text,
+            routing_config=cfg,
+            agent_state=agent_state,
         )
 
     # 3. Fast eligibility checks.
@@ -216,7 +233,7 @@ def resolve_cognitive_route(
         fast_blockers.append("contains_code_block")
 
     if not fast_blockers:
-        return CognitiveRoute(
+        route = CognitiveRoute(
             mode="fast",
             retrieval_plan="principles_only",
             verification_plan="none",
@@ -224,9 +241,15 @@ def resolve_cognitive_route(
             consistency_check=False,
             routing_reasons=["short_simple"],
         )
+        return _apply_interaction_stance(
+            route,
+            user_message=text,
+            routing_config=cfg,
+            agent_state=agent_state,
+        )
 
     # 4. Standard fallback.
-    return CognitiveRoute(
+    route = CognitiveRoute(
         mode="standard",
         retrieval_plan="principles_plus_semantic",
         verification_plan="light",
@@ -234,6 +257,41 @@ def resolve_cognitive_route(
         consistency_check=False,
         routing_reasons=fast_blockers,
     )
+    return _apply_interaction_stance(
+        route,
+        user_message=text,
+        routing_config=cfg,
+        agent_state=agent_state,
+    )
+
+
+def _apply_interaction_stance(
+    route: CognitiveRoute,
+    *,
+    user_message: str,
+    routing_config: dict[str, Any] | None,
+    agent_state: dict[str, Any] | None,
+) -> CognitiveRoute:
+    """Attach PR10 interaction stance metadata without changing dispatch fields."""
+    try:
+        from agent.interaction_stance import resolve_interaction_stance
+
+        stance = resolve_interaction_stance(
+            user_message=user_message,
+            cognition_route=route,
+            routing_config=routing_config,
+            agent_state=agent_state,
+        )
+        route.dialogue_mode = stance.dialogue_mode
+        route.answer_density = stance.answer_density
+        route.stance_reasons = list(stance.stance_reasons)
+    except Exception:
+        # Pure metadata must fail open. Runtime callers also wrap the router, but
+        # keeping this helper non-raising prevents PR10 from changing routing.
+        route.dialogue_mode = "query"
+        route.answer_density = "standard"
+        route.stance_reasons = ["interaction_stance_failed"]
+    return route
 
 
 def gate_cheap_route(

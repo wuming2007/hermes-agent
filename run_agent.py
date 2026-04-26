@@ -5769,6 +5769,9 @@ class AIAgent:
                     allow_cheap_model=False,
                     consistency_check=False,
                     routing_reasons=list(route.routing_reasons) + ["uncertainty_escalated:standard"],
+                    dialogue_mode=route.dialogue_mode,
+                    answer_density=route.answer_density,
+                    stance_reasons=list(route.stance_reasons),
                 )
             if target_mode == "deep":
                 consistency_cfg = cognition_cfg.get("consistency_guard") or {}
@@ -5780,6 +5783,9 @@ class AIAgent:
                     allow_cheap_model=False,
                     consistency_check=bool(consistency_enabled),
                     routing_reasons=list(route.routing_reasons) + ["uncertainty_escalated:deep"],
+                    dialogue_mode=route.dialogue_mode,
+                    answer_density=route.answer_density,
+                    stance_reasons=list(route.stance_reasons),
                 )
             return route
 
@@ -5834,6 +5840,9 @@ class AIAgent:
                 "allow_cheap_model": route.allow_cheap_model,
                 "consistency_check": route.consistency_check,
                 "routing_reasons": list(route.routing_reasons),
+                "dialogue_mode": route.dialogue_mode,
+                "answer_density": route.answer_density,
+                "stance_reasons": list(route.stance_reasons),
             }
             if uncertainty_decision is not None:
                 self._current_turn_cognition_metadata.update({

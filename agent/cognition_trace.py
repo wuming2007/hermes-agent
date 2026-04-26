@@ -85,6 +85,11 @@ def build_cognition_turn_trace(metadata: Mapping[str, Any] | None) -> dict[str, 
             "consistency_check": _as_optional_bool(meta.get("consistency_check")),
             "routing_reasons": _as_str_list(meta.get("routing_reasons")),
         },
+        "interaction": {
+            "dialogue_mode": _as_optional_str(meta.get("dialogue_mode")) or "query",
+            "answer_density": _as_optional_str(meta.get("answer_density")) or "standard",
+            "stance_reasons": _as_str_list(meta.get("stance_reasons")),
+        },
         "uncertainty": {
             "present": uncertainty_present,
             "confidence_band": _as_optional_str(meta.get("uncertainty_confidence_band")),

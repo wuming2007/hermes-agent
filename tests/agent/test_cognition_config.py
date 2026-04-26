@@ -68,12 +68,14 @@ class TestGetCognitionConfig:
                 "fast_mode": "broken",
                 "deep_mode_triggers": [1, 2, 3],
                 "consistency_guard": 42,
+                "interaction_stance": "bad",
             }
         }
         result = get_cognition_config(cfg)
         assert result["fast_mode"] == {}
         assert result["deep_mode_triggers"] == {}
         assert result["consistency_guard"] == {}
+        assert result["interaction_stance"] == {}
         assert result["enabled"] is True
 
     def test_partial_block_preserves_provided_keys(self):
