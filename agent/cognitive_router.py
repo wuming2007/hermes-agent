@@ -99,6 +99,17 @@ _DEEP_CATEGORIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("risky_external_actions", "risky_external", _RISKY_EXTERNAL_KEYWORDS),
 )
 
+_STATUS_LOOKUP_KEYWORDS: tuple[str, ...] = (
+    "status", "state", "progress", "currently", "where are we", "what remains",
+    "目前", "狀態", "進度", "做到哪", "剩下", "還差", "完成了嗎", "現在如何",
+)
+
+_PROJECT_STATE_KEYWORDS: tuple[str, ...] = (
+    "project", "repo", "stack", "worktree", "branch", "cognition", "hermes", "task",
+    "專案", "任務", "分支", "工作樹", "實作", "認知",
+)
+
+_PR_RE = re.compile(r"\bpr\s*#?\d+\b", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 
 
@@ -144,6 +155,24 @@ def _hits_category(text_lower: str, keywords: Iterable[str]) -> str | None:
     for kw in keywords:
         if _matches_keyword(text_lower, kw):
             return kw
+    return None
+
+
+def _status_lookup_reason(text_lower: str) -> str | None:
+    """Return a PR11 reason when a short status question needs lookup depth.
+
+    A plain "status?" can still be generic.  This guard is for project/work
+    state surfaces where answering from principles-only/cheap routing is unsafe.
+    """
+    status_hit = _hits_category(text_lower, _STATUS_LOOKUP_KEYWORDS)
+    if not status_hit:
+        return None
+    project_hit = _hits_category(text_lower, _PROJECT_STATE_KEYWORDS)
+    if project_hit:
+        return f"status_lookup:{status_hit}+project_state:{project_hit}"
+    pr_match = _PR_RE.search(text_lower)
+    if pr_match:
+        return f"status_lookup:{status_hit}+project_state:{pr_match.group(0).lower()}"
     return None
 
 
@@ -198,7 +227,25 @@ def resolve_cognitive_route(
             agent_state=agent_state,
         )
 
-    # 2. Empty / whitespace-only message: standard is the safe default; cheap
+    # 2. Project/work status questions need at least standard lookup depth.
+    status_lookup_reason = _status_lookup_reason(text_lower)
+    if status_lookup_reason:
+        route = CognitiveRoute(
+            mode="standard",
+            retrieval_plan="principles_plus_semantic",
+            verification_plan="light",
+            allow_cheap_model=False,
+            consistency_check=False,
+            routing_reasons=[status_lookup_reason],
+        )
+        return _apply_interaction_stance(
+            route,
+            user_message=text,
+            routing_config=cfg,
+            agent_state=agent_state,
+        )
+
+    # 3. Empty / whitespace-only message: standard is the safe default; cheap
     # routing on an empty message is meaningless.
     if not text:
         route = CognitiveRoute(
@@ -216,7 +263,7 @@ def resolve_cognitive_route(
             agent_state=agent_state,
         )
 
-    # 3. Fast eligibility checks.
+    # 4. Fast eligibility checks.
     max_chars = _coerce_int(fast_cfg.get("max_chars"), 160)
     max_words = _coerce_int(fast_cfg.get("max_words"), 28)
     allow_urls = _coerce_bool(fast_cfg.get("allow_urls"), False)
@@ -248,7 +295,7 @@ def resolve_cognitive_route(
             agent_state=agent_state,
         )
 
-    # 4. Standard fallback.
+    # 5. Standard fallback.
     route = CognitiveRoute(
         mode="standard",
         retrieval_plan="principles_plus_semantic",
