@@ -64,3 +64,13 @@ def test_cli_save_trajectories_defaults_false_when_unconfigured(monkeypatch):
 
     assert shell.save_trajectories is False
     assert kwargs["save_trajectories"] is False
+
+
+def test_cli_parses_string_save_trajectories_values(monkeypatch):
+    import cli
+
+    cfg = _make_config(cli, root="true", agent="false")
+    shell, kwargs = _init_shell_with_config(monkeypatch, cfg)
+
+    assert shell.save_trajectories is False
+    assert kwargs["save_trajectories"] is False

@@ -132,6 +132,24 @@ def _parse_service_tier_config(raw: str) -> str | None:
 
 
 
+def _parse_bool_config(raw: Any, *, default: bool = False) -> bool:
+    """Parse a YAML/env-style boolean config value without treating 'false' as true."""
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "y", "on", "enabled"}:
+        return True
+    if value in {"0", "false", "no", "n", "off", "disabled", "none", ""}:
+        return False
+    logger.warning("Unknown boolean config value '%s', using default=%s", raw, default)
+    return default
+
+
+
 def _get_chrome_debug_candidates(system: str) -> list[str]:
     """Return likely browser executables for local CDP auto-launch."""
     candidates: list[str] = []
@@ -1708,6 +1726,13 @@ class HermesCLI:
             self.max_turns = int(os.getenv("HERMES_MAX_ITERATIONS"))
         else:
             self.max_turns = 90
+
+        agent_cfg = CLI_CONFIG.get("agent") or {}
+        if "save_trajectories" in agent_cfg:
+            save_trajectories_raw = agent_cfg.get("save_trajectories")
+        else:
+            save_trajectories_raw = CLI_CONFIG.get("save_trajectories", False)
+        self.save_trajectories = _parse_bool_config(save_trajectories_raw, default=False)
         
         # Parse and validate toolsets
         self.enabled_toolsets = toolsets
@@ -2909,6 +2934,7 @@ class HermesCLI:
                 acp_args=runtime.get("args"),
                 credential_pool=runtime.get("credential_pool"),
                 max_iterations=self.max_turns,
+                save_trajectories=self.save_trajectories,
                 enabled_toolsets=self.enabled_toolsets,
                 verbose_logging=self.verbose,
                 quiet_mode=not self.verbose,
