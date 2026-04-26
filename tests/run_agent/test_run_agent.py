@@ -4131,6 +4131,25 @@ class TestCognitiveRouting:
         assert meta["allow_cheap_model"] is True
         assert meta["consistency_check"] is False
 
+    def test_status_project_prompt_routes_standard_and_blocks_cheap_model(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "目前 cognition stack 狀態如何？")
+        route = agent._current_cognitive_route
+        assert route is not None
+        assert route.mode == "standard"
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "standard"
+        assert meta["retrieval_plan"] == "principles_plus_semantic"
+        assert meta["verification_plan"] == "light"
+        assert meta["allow_cheap_model"] is False
+        assert meta["dialogue_mode"] == "status"
+        assert meta["answer_density"] == "brief"
+        assert any("status_lookup" in reason or "project_state" in reason for reason in meta["routing_reasons"])
+        trace = meta["cognition_trace"]
+        assert trace["route"]["mode"] == "standard"
+        assert trace["interaction"]["dialogue_mode"] == "status"
+
     def test_enabled_historical_prompt_routes_deep(self, agent):
         self._setup_agent(agent)
         agent._cognition_config = _FAST_COGNITION_CFG

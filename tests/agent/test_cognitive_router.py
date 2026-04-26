@@ -191,6 +191,36 @@ def test_route_detects_status_stance():
     assert any(reason.startswith("status:") for reason in route.stance_reasons)
 
 
+def test_project_status_prompt_routes_standard_not_fast():
+    route = _resolve("目前 cognition stack 狀態如何？")
+    assert route is not None
+    assert route.mode == "standard"
+    assert route.retrieval_plan == "principles_plus_semantic"
+    assert route.verification_plan == "light"
+    assert route.allow_cheap_model is False
+    assert any("status_lookup" in reason or "project_state" in reason for reason in route.routing_reasons)
+    assert route.dialogue_mode == "status"
+    assert route.answer_density == "brief"
+
+
+def test_pr_status_prompt_routes_standard_not_fast():
+    route = _resolve("PR11 狀態？")
+    assert route is not None
+    assert route.mode == "standard"
+    assert route.retrieval_plan == "principles_plus_semantic"
+    assert route.verification_plan == "light"
+    assert route.allow_cheap_model is False
+    assert any("status_lookup" in reason or "project_state" in reason for reason in route.routing_reasons)
+
+
+def test_regular_short_query_stays_fast():
+    route = _resolve("what time is it in tokyo?")
+    assert route is not None
+    assert route.mode == "fast"
+    assert route.allow_cheap_model is True
+    assert route.retrieval_plan == "principles_only"
+
+
 def test_cognitive_route_constructor_keeps_old_call_shape():
     route = CognitiveRoute(
         mode="fast",
