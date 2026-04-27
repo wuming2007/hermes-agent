@@ -286,3 +286,58 @@ def test_plasticity_metadata_is_grouped():
         "decayed_count": 1,
         "superseded_count": 1,
     }
+
+
+def test_autonomy_defaults_when_absent():
+    trace = build_cognition_turn_trace({"mode": "standard"})
+
+    assert trace["autonomy"] == {
+        "enabled": False,
+        "level": "observe",
+        "competence_band": "unknown",
+        "risk_level": "low",
+        "external_action": False,
+        "approval_required": False,
+        "approval_present": False,
+        "evidence_required": False,
+        "evidence_present": False,
+        "policy_supported": False,
+        "intervention_reasons": [],
+        "self_model_notes": [],
+    }
+
+
+def test_autonomy_metadata_is_grouped():
+    trace = build_cognition_turn_trace(
+        {
+            "mode": "deep",
+            "autonomy_enabled": True,
+            "autonomy_level": "act_with_approval",
+            "autonomy_competence_band": "high",
+            "autonomy_risk_level": "medium",
+            "autonomy_external_action": True,
+            "autonomy_approval_required": True,
+            "autonomy_approval_present": True,
+            "autonomy_evidence_required": True,
+            "autonomy_evidence_present": True,
+            "autonomy_policy_supported": True,
+            "autonomy_intervention_reasons": ("external_action_requires_approval",),
+            "autonomy_self_model_notes": ("policy_supported",),
+        }
+    )
+
+    assert trace["autonomy"] == {
+        "enabled": True,
+        "level": "act_with_approval",
+        "competence_band": "high",
+        "risk_level": "medium",
+        "external_action": True,
+        "approval_required": True,
+        "approval_present": True,
+        "evidence_required": True,
+        "evidence_present": True,
+        "policy_supported": True,
+        "intervention_reasons": ["external_action_requires_approval"],
+        "self_model_notes": ["policy_supported"],
+    }
+
