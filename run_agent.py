@@ -8268,6 +8268,16 @@ class AIAgent:
                             })
                     except Exception:
                         pass
+                    try:
+                        _plasticity_meta = getattr(
+                            self._memory_manager, "last_plasticity_metadata", None
+                        )
+                        if isinstance(_plasticity_meta, dict) and isinstance(
+                            self._current_turn_cognition_metadata, dict
+                        ):
+                            self._current_turn_cognition_metadata.update(_plasticity_meta)
+                    except Exception:
+                        pass
                 else:
                     _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:

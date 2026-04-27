@@ -39,6 +39,10 @@ from agent.memory_ranker import (
     candidate_with_normalized_metadata,
     rank_memory_candidates,
 )
+from agent.memory_plasticity import (
+    apply_plasticity_to_candidate,
+    build_plasticity_metadata,
+)
 from agent.policy_memory import (
     build_policy_memory_context,
     build_policy_recall_metadata,
@@ -99,6 +103,7 @@ class MemoryManager:
             "citations": [],
             "categories": [],
         }
+        self.last_plasticity_metadata: dict[str, Any] = build_plasticity_metadata([])
 
     # -- Registration --------------------------------------------------------
 
@@ -252,6 +257,8 @@ class MemoryManager:
         failures or ranker failures fall back to the existing layered behavior.
         """
         candidates: list[MemoryCandidate] = []
+        plasticity_decisions = []
+        self.last_plasticity_metadata = build_plasticity_metadata([])
         layer_tuple = tuple(layers or ())
         if "principles" in layer_tuple:
             try:
@@ -297,13 +304,24 @@ class MemoryManager:
             for candidate in result:
                 if isinstance(candidate, MemoryCandidate):
                     try:
-                        candidates.append(candidate_with_normalized_metadata(candidate))
+                        normalized = candidate_with_normalized_metadata(candidate)
                     except Exception as e:
                         logger.debug(
                             "Memory candidate metadata normalization failed (non-fatal): %s",
                             e,
                         )
-                        candidates.append(candidate)
+                        normalized = candidate
+                    try:
+                        adjusted, decision = apply_plasticity_to_candidate(normalized)
+                        candidates.append(adjusted)
+                        if decision.action != "maintain":
+                            plasticity_decisions.append(decision)
+                    except Exception as e:
+                        logger.debug(
+                            "Memory candidate plasticity failed (non-fatal): %s",
+                            e,
+                        )
+                        candidates.append(normalized)
 
         if "principles" in layer_tuple:
             try:
@@ -317,6 +335,8 @@ class MemoryManager:
                         candidates.append(policy_item_to_candidate(result.item, query=query))
             except Exception as e:
                 logger.debug("Policy candidate conversion failed (non-fatal): %s", e)
+
+        self.last_plasticity_metadata = build_plasticity_metadata(plasticity_decisions)
 
         if not candidates:
             return self.prefetch_for_policy(

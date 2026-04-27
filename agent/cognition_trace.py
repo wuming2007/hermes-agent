@@ -130,4 +130,12 @@ def build_cognition_turn_trace(metadata: Mapping[str, Any] | None) -> dict[str, 
             "unsupported_claims": _as_str_list(meta.get("process_monitor_unsupported_claims")),
             "policy_gap_claims": _as_str_list(meta.get("process_monitor_policy_gap_claims")),
         },
+        "plasticity": {
+            "enabled": _as_bool(meta.get("plasticity_enabled"), False),
+            "decision_count": int(meta.get("plasticity_decision_count") or 0),
+            "actions": _as_str_list(meta.get("plasticity_actions")),
+            "promoted_count": int(meta.get("plasticity_promoted_count") or 0),
+            "decayed_count": int(meta.get("plasticity_decayed_count") or 0),
+            "superseded_count": int(meta.get("plasticity_superseded_count") or 0),
+        },
     }
