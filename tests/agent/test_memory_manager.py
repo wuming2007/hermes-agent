@@ -9,7 +9,7 @@ import pytest
 
 from agent.memory_manager import MemoryManager
 from agent.memory_provider import MemoryProvider
-from agent.memory_ranker import MemoryCandidate, MemoryRankerConfig
+from agent.memory_ranker import MemoryCandidate, MemoryObjectMetadata, MemoryRankerConfig
 
 
 # ---------------------------------------------------------------------------
@@ -301,3 +301,95 @@ class TestManagerPrefetchRankedForPolicy:
         result = mgr.prefetch_ranked_for_policy("q", layers=("semantic",), session_id="s")
 
         assert result == "legacy-layered"
+
+
+class _MetadataDescribingProvider(_CandidateProvider):
+    def __init__(self, name: str = "meta", candidates=None, description=None):
+        super().__init__(name=name, candidates=candidates)
+        self._description = description or {"keys": ["source_trace", "confidence"]}
+
+    def describe_memory_object_metadata(self):
+        return dict(self._description)
+
+
+class _MetadataDescriptionRaisingProvider(_CandidateProvider):
+    def describe_memory_object_metadata(self):
+        raise RuntimeError("description broken")
+
+
+class TestMemoryObjectMetadataManager:
+    def test_ranked_prefetch_normalizes_candidate_metadata_into_context(self):
+        provider = _CandidateProvider(
+            candidates=[
+                MemoryCandidate(
+                    text="auditable memory",
+                    provider="p",
+                    relevance=1.0,
+                    metadata={
+                        "source_trace": ["MEMORY.md", "USER.md"],
+                        "confidence": 0.7,
+                        "status": "active",
+                        "last_verified_at": "2026-04-27",
+                    },
+                )
+            ]
+        )
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        result = mgr.prefetch_ranked_for_policy("q", layers=("semantic",), session_id="s")
+
+        assert "auditable memory" in result
+        assert "source_trace=MEMORY.md>USER.md" in result
+        assert "confidence=0.70" in result
+        assert "status=active" in result
+        assert "verified=2026-04-27" in result
+
+    def test_ranked_prefetch_normalizes_candidate_metadata_object(self):
+        provider = _CandidateProvider(
+            candidates=[
+                MemoryCandidate(
+                    text="metadata object",
+                    provider="p",
+                    relevance=1.0,
+                    metadata=MemoryObjectMetadata(
+                        source_trace=("provider-db",), confidence=0.9, status="inferred"
+                    ),
+                )
+            ]
+        )
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        result = mgr.prefetch_ranked_for_policy("q", layers=("semantic",), session_id="s")
+
+        assert "metadata object" in result
+        assert "source_trace=provider-db" in result
+        assert "confidence=0.90" in result
+        assert "status=inferred" in result
+
+    def test_describe_memory_metadata_support_collects_provider_descriptions(self):
+        provider = _MetadataDescribingProvider(
+            name="meta-provider",
+            description={"supports": ["source_trace", "confidence"], "version": 1},
+        )
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        result = mgr.describe_memory_metadata_support()
+
+        assert result == {
+            "providers": {
+                "meta-provider": {"supports": ["source_trace", "confidence"], "version": 1}
+            }
+        }
+
+    def test_describe_memory_metadata_support_exception_is_non_fatal(self):
+        boom = _MetadataDescriptionRaisingProvider(name="boom")
+        good = _MetadataDescribingProvider(name="good", description={"version": 1})
+        mgr = MemoryManager()
+        mgr._providers.extend([boom, good])
+
+        result = mgr.describe_memory_metadata_support()
+
+        assert result == {"providers": {"good": {"version": 1}}}

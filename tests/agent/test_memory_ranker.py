@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from agent.memory_ranker import (
     MemoryCandidate,
+    MemoryObjectMetadata,
     MemoryRankerConfig,
     build_ranked_memory_context,
+    candidate_with_normalized_metadata,
     clamp_signal,
+    memory_metadata_label,
+    memory_metadata_to_dict,
     memory_tier_for_score,
+    normalize_memory_metadata,
     rank_memory_candidates,
     score_memory_candidate,
 )
@@ -110,3 +115,177 @@ def test_build_ranked_memory_context_includes_metadata_and_respects_char_budget(
     assert "source=MEMORY.md" in context
     assert "important memory" in context
     assert len(context) <= config.max_chars
+
+
+# ---------------------------------------------------------------------------
+# PR14 memory object metadata / source trace
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_memory_metadata_defaults_to_unverified():
+    metadata = normalize_memory_metadata(None)
+
+    assert isinstance(metadata, MemoryObjectMetadata)
+    assert metadata.source_trace == ()
+    assert metadata.compression_level == 0
+    assert metadata.confidence is None
+    assert metadata.last_verified_at == ""
+    assert metadata.superseded_by == ""
+    assert metadata.reinforcement_count == 0
+    assert metadata.status == "unverified"
+
+
+def test_normalize_memory_metadata_from_dict_sanitizes_fields():
+    metadata = normalize_memory_metadata(
+        {
+            "source_trace": ["MEMORY.md", 123, "USER.md"],
+            "compression_level": "2",
+            "confidence": 1.5,
+            "last_verified_at": "2026-04-27T10:00:00+08:00",
+            "superseded_by": "mem-2",
+            "reinforcement_count": "3",
+            "status": "active",
+            "notes": {"kind": "preference"},
+        }
+    )
+
+    assert metadata.source_trace == ("MEMORY.md", "123", "USER.md")
+    assert metadata.compression_level == 2
+    assert metadata.confidence == 1.0
+    assert metadata.last_verified_at == "2026-04-27T10:00:00+08:00"
+    assert metadata.superseded_by == "mem-2"
+    assert metadata.reinforcement_count == 3
+    assert metadata.status == "active"
+    assert metadata.notes == {"kind": "preference"}
+
+
+def test_normalize_memory_metadata_invalid_values_are_safe():
+    metadata = normalize_memory_metadata(
+        {
+            "source_trace": "MEMORY.md > USER.md",
+            "compression_level": -5,
+            "confidence": "bad",
+            "reinforcement_count": -9,
+            "status": "mystery",
+            "notes": "not-a-mapping",
+        }
+    )
+
+    assert metadata.source_trace == ("MEMORY.md > USER.md",)
+    assert metadata.compression_level == 0
+    assert metadata.confidence is None
+    assert metadata.reinforcement_count == 0
+    assert metadata.status == "unverified"
+    assert metadata.notes is None
+
+
+def test_memory_metadata_to_dict_is_json_friendly():
+    metadata = MemoryObjectMetadata(
+        source_trace=("a", "b"),
+        compression_level=1,
+        confidence=0.75,
+        last_verified_at="2026-04-27",
+        superseded_by="newer",
+        reinforcement_count=4,
+        status="stale",
+        notes={"why": "corrected"},
+    )
+
+    as_dict = memory_metadata_to_dict(metadata)
+
+    assert as_dict == {
+        "source_trace": ["a", "b"],
+        "compression_level": 1,
+        "confidence": 0.75,
+        "last_verified_at": "2026-04-27",
+        "superseded_by": "newer",
+        "reinforcement_count": 4,
+        "status": "stale",
+        "notes": {"why": "corrected"},
+    }
+
+
+def test_candidate_with_normalized_metadata_does_not_mutate_original():
+    candidate = MemoryCandidate(
+        text="remember this",
+        metadata={"source_trace": ["raw"], "confidence": 0.6, "status": "active"},
+    )
+
+    normalized = candidate_with_normalized_metadata(candidate)
+
+    assert candidate.metadata == {"source_trace": ["raw"], "confidence": 0.6, "status": "active"}
+    assert isinstance(normalized.metadata, MemoryObjectMetadata)
+    assert normalized.metadata.source_trace == ("raw",)
+    assert normalized.metadata.confidence == 0.6
+    assert normalized.metadata.status == "active"
+
+
+def test_memory_metadata_label_is_compact_and_auditable():
+    metadata = MemoryObjectMetadata(
+        source_trace=("MEMORY.md", "USER.md"),
+        compression_level=1,
+        confidence=0.8,
+        last_verified_at="2026-04-27",
+        superseded_by="mem-new",
+        reinforcement_count=2,
+        status="superseded",
+    )
+
+    label = memory_metadata_label(metadata)
+
+    assert "status=superseded" in label
+    assert "confidence=0.80" in label
+    assert "verified=2026-04-27" in label
+    assert "source_trace=MEMORY.md>USER.md" in label
+    assert "superseded_by=mem-new" in label
+    assert "compression=1" in label
+    assert "reinforced=2" in label
+
+
+def test_build_ranked_memory_context_includes_object_metadata_label():
+    ranked = rank_memory_candidates(
+        [
+            MemoryCandidate(
+                text="private gmail calendar rule",
+                provider="builtin",
+                object_id="mem-1",
+                relevance=1.0,
+                confidence=0.8,
+                metadata={
+                    "source_trace": ["USER.md"],
+                    "confidence": 0.8,
+                    "last_verified_at": "2026-04-27",
+                    "status": "active",
+                    "reinforcement_count": 2,
+                },
+            )
+        ]
+    )
+
+    context = build_ranked_memory_context(ranked)
+
+    assert "object_id=mem-1" in context
+    assert "status=active" in context
+    assert "confidence=0.80" in context
+    assert "verified=2026-04-27" in context
+    assert "source_trace=USER.md" in context
+    assert "reinforced=2" in context
+    assert "private gmail calendar rule" in context
+
+
+def test_superseded_metadata_remains_visible_not_silently_dropped():
+    ranked = rank_memory_candidates(
+        [
+            MemoryCandidate(
+                text="old rule",
+                relevance=1.0,
+                metadata={"status": "superseded", "superseded_by": "new-rule"},
+            )
+        ]
+    )
+
+    context = build_ranked_memory_context(ranked)
+
+    assert "old rule" in context
+    assert "status=superseded" in context
+    assert "superseded_by=new-rule" in context
