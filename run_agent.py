@@ -77,6 +77,11 @@ from hermes_constants import OPENROUTER_BASE_URL
 # Agent internals extracted to agent/ package for modularity
 from agent.memory_manager import build_memory_context_block
 from agent.cognition_trace import build_cognition_turn_trace
+from agent.process_monitor import (
+    assess_claims,
+    build_process_monitor_metadata,
+    extract_claims_from_response,
+)
 from agent.consistency_guard import (
     resolve_verification_ladder,
     resolve_verification_plan,
@@ -10759,6 +10764,39 @@ class AIAgent:
                 # Non-fatal: guard must never break the turn.
                 logger.warning(
                     "consistency_guard wiring raised (non-fatal): %s", exc
+                )
+
+        # ── Process monitor / claimwise verification (PR16) ──────────────
+        # Observational only: it records evidence/policy gaps for the final
+        # post-guard response. It must never rewrite or block the response.
+        if final_response and not interrupted and self._current_cognitive_route is not None:
+            try:
+                _policy_refs = []
+                _verification_notes = []
+                if isinstance(self._current_turn_cognition_metadata, dict):
+                    _policy_refs = list(
+                        self._current_turn_cognition_metadata.get(
+                            "policy_memory_citations"
+                        )
+                        or []
+                    )
+                    _verification_notes = list(
+                        self._current_turn_cognition_metadata.get("verification_notes")
+                        or []
+                    )
+                _claims = extract_claims_from_response(final_response)
+                _process_report = assess_claims(
+                    _claims,
+                    policy_refs=_policy_refs,
+                    verification_notes=_verification_notes,
+                )
+                if isinstance(self._current_turn_cognition_metadata, dict):
+                    self._current_turn_cognition_metadata.update(
+                        build_process_monitor_metadata(_process_report)
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "process_monitor raised (non-fatal): %s", exc
                 )
 
         # ── Cognition turn trace snapshot (PR7) ──────────────────────────
