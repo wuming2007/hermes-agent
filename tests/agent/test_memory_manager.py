@@ -497,3 +497,83 @@ class TestPolicyMemoryManager:
         assert "Confirm before sending email." not in result
         assert provider.policy_calls == []
         assert mgr.last_policy_recall_metadata["count"] == 0
+
+
+class TestMemoryPlasticityManager:
+    def test_ranked_prefetch_applies_plasticity_before_ranking(self):
+        provider = _CandidateProvider(
+            candidates=[
+                MemoryCandidate(
+                    text="candidate promoted by repeated success",
+                    provider="p",
+                    relevance=0.3,
+                    reinforcement=0.1,
+                    confidence=0.2,
+                    decay_penalty=0.4,
+                    metadata={
+                        "status": "active",
+                        "notes": {"plasticity": {"success_count": 4, "verification_count": 1}},
+                    },
+                )
+            ]
+        )
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        result = mgr.prefetch_ranked_for_policy("q", layers=("semantic",), session_id="s")
+
+        assert "candidate promoted by repeated success" in result
+        assert "reinforced=" in result
+        assert mgr.last_plasticity_metadata == {
+            "plasticity_enabled": True,
+            "plasticity_decision_count": 1,
+            "plasticity_actions": ["promote"],
+            "plasticity_promoted_count": 1,
+            "plasticity_decayed_count": 0,
+            "plasticity_superseded_count": 0,
+        }
+
+    def test_ranked_prefetch_marks_superseded_memory_without_dropping_it(self):
+        provider = _CandidateProvider(
+            candidates=[
+                MemoryCandidate(
+                    text="older instruction",
+                    provider="p",
+                    relevance=1.0,
+                    metadata={"notes": {"plasticity": {"superseded_by": "new-instruction"}}},
+                )
+            ]
+        )
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        result = mgr.prefetch_ranked_for_policy("q", layers=("semantic",), session_id="s")
+
+        assert "older instruction" in result
+        assert "status=superseded" in result
+        assert "superseded_by=new-instruction" in result
+        assert mgr.last_plasticity_metadata["plasticity_actions"] == ["supersede"]
+
+    def test_plasticity_failure_is_non_fatal(self, monkeypatch):
+        provider = _CandidateProvider(
+            candidates=[
+                MemoryCandidate(
+                    text="survives plasticity failure",
+                    provider="p",
+                    relevance=1.0,
+                    metadata={"notes": {"plasticity": {"success_count": 3}}},
+                )
+            ]
+        )
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("plasticity exploded")
+
+        monkeypatch.setattr("agent.memory_manager.apply_plasticity_to_candidate", _boom)
+
+        result = mgr.prefetch_ranked_for_policy("q", layers=("semantic",), session_id="s")
+
+        assert "survives plasticity failure" in result
+        assert mgr.last_plasticity_metadata["plasticity_decision_count"] == 0

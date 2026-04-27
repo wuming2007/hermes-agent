@@ -250,3 +250,39 @@ def test_process_monitor_metadata_is_grouped():
         "unsupported_claims": ["The branch is clean."],
         "policy_gap_claims": ["I will send an email."],
     }
+
+
+def test_plasticity_defaults_when_absent():
+    trace = build_cognition_turn_trace({"mode": "standard"})
+
+    assert trace["plasticity"] == {
+        "enabled": False,
+        "decision_count": 0,
+        "actions": [],
+        "promoted_count": 0,
+        "decayed_count": 0,
+        "superseded_count": 0,
+    }
+
+
+def test_plasticity_metadata_is_grouped():
+    trace = build_cognition_turn_trace(
+        {
+            "mode": "deep",
+            "plasticity_enabled": True,
+            "plasticity_decision_count": 3,
+            "plasticity_actions": ("promote", "decay", "supersede"),
+            "plasticity_promoted_count": 1,
+            "plasticity_decayed_count": 1,
+            "plasticity_superseded_count": 1,
+        }
+    )
+
+    assert trace["plasticity"] == {
+        "enabled": True,
+        "decision_count": 3,
+        "actions": ["promote", "decay", "supersede"],
+        "promoted_count": 1,
+        "decayed_count": 1,
+        "superseded_count": 1,
+    }
