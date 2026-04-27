@@ -208,3 +208,45 @@ def test_policy_metadata_is_grouped():
         "citations": ["policy:send-guard@1", "policy:privacy@2"],
         "categories": ["external_action", "privacy"],
     }
+
+
+def test_process_monitor_defaults_when_absent():
+    trace = build_cognition_turn_trace({"mode": "standard"})
+
+    assert trace["process_monitor"] == {
+        "enabled": False,
+        "claim_count": 0,
+        "supported_count": 0,
+        "evidence_gap_count": 0,
+        "policy_gap_count": 0,
+        "claim_kinds": [],
+        "unsupported_claims": [],
+        "policy_gap_claims": [],
+    }
+
+
+def test_process_monitor_metadata_is_grouped():
+    trace = build_cognition_turn_trace(
+        {
+            "mode": "deep",
+            "process_monitor_enabled": True,
+            "process_monitor_claim_count": 2,
+            "process_monitor_supported_count": 1,
+            "process_monitor_evidence_gap_count": 1,
+            "process_monitor_policy_gap_count": 1,
+            "process_monitor_claim_kinds": ("status", "action"),
+            "process_monitor_unsupported_claims": ("The branch is clean.",),
+            "process_monitor_policy_gap_claims": ("I will send an email.",),
+        }
+    )
+
+    assert trace["process_monitor"] == {
+        "enabled": True,
+        "claim_count": 2,
+        "supported_count": 1,
+        "evidence_gap_count": 1,
+        "policy_gap_count": 1,
+        "claim_kinds": ["status", "action"],
+        "unsupported_claims": ["The branch is clean."],
+        "policy_gap_claims": ["I will send an email."],
+    }

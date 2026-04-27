@@ -4516,6 +4516,45 @@ def _drive_simple_turn(agent, message: str, *, content: str = "candidate"):
         return agent.run_conversation(message)
 
 
+class TestProcessMonitorWiring:
+    """PR16: process monitor runs after guard and only records metadata/trace."""
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+    def test_process_monitor_metadata_and_trace_are_attached(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+
+        result = _drive_simple_turn(agent, "status?", content="The branch is clean.")
+
+        assert result["final_response"] == "The branch is clean."
+        meta = result["cognition_metadata"]
+        assert meta["process_monitor_enabled"] is True
+        assert meta["process_monitor_claim_count"] == 1
+        assert meta["process_monitor_evidence_gap_count"] == 1
+        assert meta["process_monitor_unsupported_claims"] == ["The branch is clean."]
+        assert result["cognition_trace"]["process_monitor"]["claim_count"] == 1
+        assert result["cognition_trace"]["process_monitor"]["unsupported_claims"] == [
+            "The branch is clean."
+        ]
+
+    def test_process_monitor_failure_is_non_fatal(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+
+        with patch("run_agent.extract_claims_from_response", side_effect=RuntimeError("boom")):
+            result = _drive_simple_turn(agent, "status?", content="The branch is clean.")
+
+        assert result["final_response"] == "The branch is clean."
+        assert result["completed"] is True
+        assert result["cognition_trace"] is not None
+
+
 class TestConsistencyGuardWiring:
     """PR3 wiring: post-generation guard runs based on verification_plan,
     revises final_response when full guard says revise, stays non-fatal,
