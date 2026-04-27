@@ -140,6 +140,15 @@ class MemoryProvider(ABC):
         """
         return []
 
+    def describe_memory_object_metadata(self) -> Dict[str, Any]:
+        """Describe provider-supported memory metadata keys (PR14).
+
+        Providers can override this to declare source-trace / confidence /
+        verification metadata support. The default keeps existing providers
+        fully backward-compatible.
+        """
+        return {}
+
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Queue a background recall for the NEXT turn.
 

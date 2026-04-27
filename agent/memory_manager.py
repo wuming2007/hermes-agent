@@ -36,6 +36,7 @@ from agent.memory_ranker import (
     MemoryCandidate,
     MemoryRankerConfig,
     build_ranked_memory_context,
+    candidate_with_normalized_metadata,
     rank_memory_candidates,
 )
 from agent.memory_provider import MemoryProvider
@@ -253,7 +254,14 @@ class MemoryManager:
                 continue
             for candidate in result:
                 if isinstance(candidate, MemoryCandidate):
-                    candidates.append(candidate)
+                    try:
+                        candidates.append(candidate_with_normalized_metadata(candidate))
+                    except Exception as e:
+                        logger.debug(
+                            "Memory candidate metadata normalization failed (non-fatal): %s",
+                            e,
+                        )
+                        candidates.append(candidate)
 
         if not candidates:
             return self.prefetch_for_policy(
@@ -270,6 +278,23 @@ class MemoryManager:
             logger.debug("Memory ranker failed (non-fatal): %s", e)
 
         return self.prefetch_for_policy(query, layers=layers, session_id=session_id)
+
+    def describe_memory_metadata_support(self) -> dict[str, Any]:
+        """Collect provider-declared memory object metadata support (PR14)."""
+        providers: dict[str, Any] = {}
+        for provider in self._providers:
+            try:
+                description = provider.describe_memory_object_metadata()
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' describe_memory_object_metadata failed (non-fatal): %s",
+                    provider.name,
+                    e,
+                )
+                continue
+            if isinstance(description, dict) and description:
+                providers[provider.name] = description
+        return {"providers": providers}
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn."""
