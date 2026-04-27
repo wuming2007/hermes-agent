@@ -32,6 +32,12 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from agent.memory_ranker import (
+    MemoryCandidate,
+    MemoryRankerConfig,
+    build_ranked_memory_context,
+    rank_memory_candidates,
+)
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
@@ -216,6 +222,54 @@ class MemoryManager:
                     provider.name, e,
                 )
         return "\n\n".join(parts)
+
+    def prefetch_ranked_for_policy(
+        self,
+        query: str,
+        *,
+        layers,
+        session_id: str = "",
+        ranker_config: MemoryRankerConfig | None = None,
+    ) -> str:
+        """Collect structured candidates and return deterministic ranked context.
+
+        This PR13 path is additive and fail-open. Providers that do not expose
+        candidates continue to use the PR2 layered text prefetch path. Provider
+        failures or ranker failures fall back to the existing layered behavior.
+        """
+        candidates: list[MemoryCandidate] = []
+        for provider in self._providers:
+            try:
+                result = provider.prefetch_candidates(
+                    query, layers=layers, session_id=session_id
+                )
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' prefetch_candidates failed (non-fatal): %s",
+                    provider.name, e,
+                )
+                continue
+            if not result:
+                continue
+            for candidate in result:
+                if isinstance(candidate, MemoryCandidate):
+                    candidates.append(candidate)
+
+        if not candidates:
+            return self.prefetch_for_policy(
+                query, layers=layers, session_id=session_id
+            )
+
+        try:
+            config = ranker_config or MemoryRankerConfig()
+            ranked = rank_memory_candidates(candidates, config=config)
+            ranked_context = build_ranked_memory_context(ranked, config=config)
+            if ranked_context and ranked_context.strip():
+                return ranked_context
+        except Exception as e:
+            logger.debug("Memory ranker failed (non-fatal): %s", e)
+
+        return self.prefetch_for_policy(query, layers=layers, session_id=session_id)
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn."""

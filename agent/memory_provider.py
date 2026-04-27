@@ -36,6 +36,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
+from agent.memory_ranker import MemoryCandidate
+
 logger = logging.getLogger(__name__)
 
 
@@ -122,6 +124,21 @@ class MemoryProvider(ABC):
         the layered path.
         """
         return self.prefetch(query, session_id=session_id)
+
+    def prefetch_candidates(
+        self,
+        query: str,
+        *,
+        layers=(),
+        session_id: str = "",
+    ) -> list[MemoryCandidate]:
+        """Return structured memory candidates for deterministic ranking (PR13).
+
+        Providers that can expose scored/metadata-rich recall items should
+        override this hook. The default returns an empty list so existing
+        providers keep their legacy text prefetch behavior unchanged.
+        """
+        return []
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Queue a background recall for the NEXT turn.
