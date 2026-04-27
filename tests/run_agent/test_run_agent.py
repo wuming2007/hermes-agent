@@ -4366,6 +4366,7 @@ def _install_memory_manager_spy(agent):
     spy = MagicMock()
     spy.prefetch_all = MagicMock(return_value="")
     spy.prefetch_for_policy = MagicMock(return_value="")
+    spy.prefetch_ranked_for_policy = MagicMock(return_value="")
     # Other manager methods called during the turn must be no-ops.
     spy.queue_prefetch_all = MagicMock()
     spy.sync_all = MagicMock()
@@ -4399,6 +4400,7 @@ class TestLayeredRetrievalPrefetch:
 
         spy.prefetch_all.assert_called_once()
         spy.prefetch_for_policy.assert_not_called()
+        spy.prefetch_ranked_for_policy.assert_not_called()
         # Query passed verbatim from the user message.
         assert spy.prefetch_all.call_args.args[0] == "hello"
 
@@ -4409,9 +4411,10 @@ class TestLayeredRetrievalPrefetch:
 
         _run_one_turn(agent, "ping")
 
-        spy.prefetch_for_policy.assert_called_once()
+        spy.prefetch_ranked_for_policy.assert_called_once()
+        spy.prefetch_for_policy.assert_not_called()
         spy.prefetch_all.assert_not_called()
-        kwargs = spy.prefetch_for_policy.call_args.kwargs
+        kwargs = spy.prefetch_ranked_for_policy.call_args.kwargs
         assert kwargs["layers"] == ("principles",)
 
     def test_standard_route_invokes_principles_plus_semantic_layered_prefetch(self, agent):
@@ -4427,9 +4430,10 @@ class TestLayeredRetrievalPrefetch:
         )
         _run_one_turn(agent, long_prompt)
 
-        spy.prefetch_for_policy.assert_called_once()
+        spy.prefetch_ranked_for_policy.assert_called_once()
+        spy.prefetch_for_policy.assert_not_called()
         spy.prefetch_all.assert_not_called()
-        assert spy.prefetch_for_policy.call_args.kwargs["layers"] == (
+        assert spy.prefetch_ranked_for_policy.call_args.kwargs["layers"] == (
             "principles", "semantic",
         )
 
@@ -4440,19 +4444,20 @@ class TestLayeredRetrievalPrefetch:
 
         _run_one_turn(agent, "上次的設計回顧")
 
-        spy.prefetch_for_policy.assert_called_once()
+        spy.prefetch_ranked_for_policy.assert_called_once()
+        spy.prefetch_for_policy.assert_not_called()
         spy.prefetch_all.assert_not_called()
-        assert spy.prefetch_for_policy.call_args.kwargs["layers"] == (
+        assert spy.prefetch_ranked_for_policy.call_args.kwargs["layers"] == (
             "principles", "semantic", "episodic",
         )
 
     def test_layered_prefetch_failure_is_non_fatal(self, agent):
-        """A raising prefetch_for_policy must not break the turn — same
+        """A raising prefetch_ranked_for_policy must not break the turn — same
         contract the legacy prefetch_all path already had."""
         self._setup_agent(agent)
         agent._cognition_config = _FAST_COGNITION_CFG
         spy = _install_memory_manager_spy(agent)
-        spy.prefetch_for_policy.side_effect = RuntimeError("boom")
+        spy.prefetch_ranked_for_policy.side_effect = RuntimeError("boom")
 
         result = _run_one_turn(agent, "ping")
         assert result["completed"] is True
@@ -4469,7 +4474,7 @@ class TestLayeredRetrievalPrefetch:
 
         spy.prefetch_all.assert_called_once()
         spy.prefetch_for_policy.assert_not_called()
-
+        spy.prefetch_ranked_for_policy.assert_not_called()
 
 # ===================================================================
 # Consistency guard wire-through (PR3)

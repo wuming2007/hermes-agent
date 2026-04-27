@@ -8244,7 +8244,7 @@ class AIAgent:
 
                 _policy = resolve_retrieval_policy(self._current_cognitive_route)
                 if _policy is not None:
-                    _ext_prefetch_cache = self._memory_manager.prefetch_for_policy(
+                    _ext_prefetch_cache = self._memory_manager.prefetch_ranked_for_policy(
                         _query, layers=_policy.layers
                     ) or ""
                 else:
