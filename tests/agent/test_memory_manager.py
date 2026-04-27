@@ -9,6 +9,7 @@ import pytest
 
 from agent.memory_manager import MemoryManager
 from agent.memory_provider import MemoryProvider
+from agent.memory_ranker import MemoryCandidate, MemoryRankerConfig
 
 
 # ---------------------------------------------------------------------------
@@ -195,3 +196,108 @@ class TestManagerPrefetchForPolicy:
         mgr.add_provider(provider)
         result = mgr.prefetch_for_policy("q", layers=("principles",), session_id="")
         assert result == ""
+
+
+class _CandidateProvider(MemoryProvider):
+    """Provides structured memory candidates for PR13 ranking tests."""
+
+    def __init__(self, name: str = "candidate", candidates=None):
+        self._name = name
+        self._candidates = list(candidates or [])
+        self.candidate_calls: list[tuple[str, tuple[str, ...], str]] = []
+        self.layered_calls: list[tuple[str, tuple[str, ...], str]] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def is_available(self) -> bool:
+        return True
+
+    def initialize(self, session_id: str, **kwargs) -> None:
+        pass
+
+    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+        return []
+
+    def prefetch_candidates(self, query: str, *, layers=(), session_id: str = ""):
+        self.candidate_calls.append((query, tuple(layers), session_id))
+        return list(self._candidates)
+
+    def prefetch_layered(self, query: str, *, layers, session_id: str = "") -> str:
+        self.layered_calls.append((query, tuple(layers), session_id))
+        return "legacy-layered"
+
+
+class _CandidateRaisingProvider(_CandidateProvider):
+    def prefetch_candidates(self, query: str, *, layers=(), session_id: str = ""):
+        raise RuntimeError("candidate prefetch broken")
+
+
+class TestManagerPrefetchRankedForPolicy:
+    def test_candidate_path_returns_ranked_context(self):
+        provider = _CandidateProvider(
+            candidates=[
+                MemoryCandidate(text="low priority", provider="p", relevance=0.1),
+                MemoryCandidate(
+                    text="high priority", provider="p", source="s1", relevance=1.0, confidence=1.0
+                ),
+            ]
+        )
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        result = mgr.prefetch_ranked_for_policy(
+            "memory question",
+            layers=("semantic",),
+            session_id="sess",
+            ranker_config=MemoryRankerConfig(max_items=2),
+        )
+
+        assert "high priority" in result
+        assert result.index("high priority") < result.index("low priority")
+        assert "[rank=1" in result
+        assert "provider=p" in result
+        assert provider.candidate_calls == [("memory question", ("semantic",), "sess")]
+        assert provider.layered_calls == []
+
+    def test_no_candidates_falls_back_to_existing_layered_prefetch(self):
+        provider = _CandidateProvider(candidates=[])
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        result = mgr.prefetch_ranked_for_policy(
+            "memory question", layers=("semantic",), session_id="sess"
+        )
+
+        assert result == "legacy-layered"
+        assert provider.layered_calls == [("memory question", ("semantic",), "sess")]
+
+    def test_candidate_provider_exception_is_non_fatal(self):
+        boom = _CandidateRaisingProvider(name="boom")
+        good = _CandidateProvider(
+            name="good",
+            candidates=[MemoryCandidate(text="survives", provider="good", relevance=1.0)],
+        )
+        mgr = MemoryManager()
+        mgr._providers.extend([boom, good])
+
+        result = mgr.prefetch_ranked_for_policy("q", layers=("semantic",), session_id="s")
+
+        assert "survives" in result
+
+    def test_ranker_failure_falls_back_to_existing_layered_prefetch(self, monkeypatch):
+        provider = _CandidateProvider(
+            candidates=[MemoryCandidate(text="candidate", provider="p", relevance=1.0)]
+        )
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("ranker exploded")
+
+        monkeypatch.setattr("agent.memory_manager.rank_memory_candidates", _boom)
+
+        result = mgr.prefetch_ranked_for_policy("q", layers=("semantic",), session_id="s")
+
+        assert result == "legacy-layered"
