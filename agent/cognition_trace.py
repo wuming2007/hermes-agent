@@ -113,4 +113,11 @@ def build_cognition_turn_trace(metadata: Mapping[str, Any] | None) -> dict[str, 
             "changed": _as_optional_bool(meta.get("verification_changed")),
             "notes": _as_str_list(meta.get("verification_notes")),
         },
+        "policy": {
+            "enabled": _as_bool(meta.get("policy_memory_enabled"), False),
+            "count": int(meta.get("policy_memory_count") or 0),
+            "policy_ids": _as_str_list(meta.get("policy_memory_ids")),
+            "citations": _as_str_list(meta.get("policy_memory_citations")),
+            "categories": _as_str_list(meta.get("policy_memory_categories")),
+        },
     }

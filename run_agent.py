@@ -8247,6 +8247,22 @@ class AIAgent:
                     _ext_prefetch_cache = self._memory_manager.prefetch_ranked_for_policy(
                         _query, layers=_policy.layers
                     ) or ""
+                    try:
+                        _policy_meta = getattr(
+                            self._memory_manager, "last_policy_recall_metadata", None
+                        )
+                        if isinstance(_policy_meta, dict) and isinstance(
+                            self._current_turn_cognition_metadata, dict
+                        ):
+                            self._current_turn_cognition_metadata.update({
+                                "policy_memory_enabled": bool(_policy_meta.get("enabled")),
+                                "policy_memory_count": int(_policy_meta.get("count") or 0),
+                                "policy_memory_ids": list(_policy_meta.get("policy_ids") or []),
+                                "policy_memory_citations": list(_policy_meta.get("citations") or []),
+                                "policy_memory_categories": list(_policy_meta.get("categories") or []),
+                            })
+                    except Exception:
+                        pass
                 else:
                     _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:
@@ -10866,6 +10882,9 @@ class AIAgent:
             "estimated_cost_usd": self.session_estimated_cost_usd,
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
+            "cognition_metadata": dict(self._current_turn_cognition_metadata)
+            if isinstance(self._current_turn_cognition_metadata, dict)
+            else {},
             "cognition_trace": _cognition_trace,
         }
         self._response_was_previewed = False

@@ -149,6 +149,14 @@ class MemoryProvider(ABC):
         """
         return {}
 
+    def prefetch_policy_items(self, query: str, *, session_id: str = "") -> list[Any]:
+        """Return first-class policy / constitution memory items (PR15).
+
+        Providers can override this to expose policy-like memories for explicit
+        recall/citation. Default no-op keeps existing providers unchanged.
+        """
+        return []
+
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Queue a background recall for the NEXT turn.
 

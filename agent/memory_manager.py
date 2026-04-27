@@ -39,6 +39,12 @@ from agent.memory_ranker import (
     candidate_with_normalized_metadata,
     rank_memory_candidates,
 )
+from agent.policy_memory import (
+    build_policy_memory_context,
+    build_policy_recall_metadata,
+    policy_item_to_candidate,
+    recall_policy_memories,
+)
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
@@ -86,6 +92,13 @@ class MemoryManager:
         self._providers: List[MemoryProvider] = []
         self._tool_to_provider: Dict[str, MemoryProvider] = {}
         self._has_external: bool = False  # True once a non-builtin provider is added
+        self.last_policy_recall_metadata: dict[str, Any] = {
+            "enabled": False,
+            "count": 0,
+            "policy_ids": [],
+            "citations": [],
+            "categories": [],
+        }
 
     # -- Registration --------------------------------------------------------
 
@@ -239,6 +252,35 @@ class MemoryManager:
         failures or ranker failures fall back to the existing layered behavior.
         """
         candidates: list[MemoryCandidate] = []
+        layer_tuple = tuple(layers or ())
+        if "principles" in layer_tuple:
+            try:
+                _policy_context, policy_metadata = self.prefetch_policy_for_query(
+                    query, session_id=session_id
+                )
+                # Context is not directly concatenated here; policy items are
+                # converted into candidates below so the PR13 ranker still owns
+                # bounded ordering. Keep metadata for runtime trace wiring.
+                del _policy_context
+            except Exception as e:
+                logger.debug("Policy memory recall failed (non-fatal): %s", e)
+                policy_metadata = {
+                    "enabled": False,
+                    "count": 0,
+                    "policy_ids": [],
+                    "citations": [],
+                    "categories": [],
+                }
+                self.last_policy_recall_metadata = policy_metadata
+        else:
+            self.last_policy_recall_metadata = {
+                "enabled": False,
+                "count": 0,
+                "policy_ids": [],
+                "citations": [],
+                "categories": [],
+            }
+
         for provider in self._providers:
             try:
                 result = provider.prefetch_candidates(
@@ -263,6 +305,19 @@ class MemoryManager:
                         )
                         candidates.append(candidate)
 
+        if "principles" in layer_tuple:
+            try:
+                for provider in self._providers:
+                    try:
+                        policy_items = provider.prefetch_policy_items(query, session_id=session_id)
+                    except Exception:
+                        continue
+                    recalled = recall_policy_memories(query, policy_items, max_items=5)
+                    for result in recalled:
+                        candidates.append(policy_item_to_candidate(result.item, query=query))
+            except Exception as e:
+                logger.debug("Policy candidate conversion failed (non-fatal): %s", e)
+
         if not candidates:
             return self.prefetch_for_policy(
                 query, layers=layers, session_id=session_id
@@ -278,6 +333,30 @@ class MemoryManager:
             logger.debug("Memory ranker failed (non-fatal): %s", e)
 
         return self.prefetch_for_policy(query, layers=layers, session_id=session_id)
+
+    def prefetch_policy_for_query(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        max_items: int = 5,
+    ) -> tuple[str, dict[str, Any]]:
+        """Recall first-class policy memories and return context + metadata."""
+        items: list[Any] = []
+        for provider in self._providers:
+            try:
+                items.extend(provider.prefetch_policy_items(query, session_id=session_id) or [])
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' prefetch_policy_items failed (non-fatal): %s",
+                    provider.name,
+                    e,
+                )
+        results = recall_policy_memories(query, items, max_items=max_items)
+        context = build_policy_memory_context(results)
+        metadata = build_policy_recall_metadata(results)
+        self.last_policy_recall_metadata = metadata
+        return context, metadata
 
     def describe_memory_metadata_support(self) -> dict[str, Any]:
         """Collect provider-declared memory object metadata support (PR14)."""
