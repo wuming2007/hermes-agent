@@ -4555,6 +4555,45 @@ class TestProcessMonitorWiring:
         assert result["cognition_trace"] is not None
 
 
+class TestAutonomyTelemetryWiring:
+    """PR18: autonomy telemetry is metadata-only and fail-open."""
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+    def test_autonomy_metadata_and_trace_are_attached(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+
+        result = _drive_simple_turn(agent, "status?", content="The branch is clean.")
+
+        assert result["final_response"] == "The branch is clean."
+        meta = result["cognition_metadata"]
+        assert meta["autonomy_enabled"] is True
+        assert meta["autonomy_level"] == "blocked_pending_evidence"
+        assert meta["autonomy_evidence_required"] is True
+        assert meta["autonomy_evidence_present"] is False
+        assert meta["autonomy_intervention_reasons"] == ["evidence_required_missing"]
+        assert result["cognition_trace"]["autonomy"]["level"] == "blocked_pending_evidence"
+        assert result["cognition_trace"]["autonomy"]["evidence_required"] is True
+
+    def test_autonomy_telemetry_failure_is_non_fatal(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+
+        with patch("run_agent.build_autonomy_telemetry_from_metadata", side_effect=RuntimeError("boom")):
+            result = _drive_simple_turn(agent, "status?", content="The branch is clean.")
+
+        assert result["final_response"] == "The branch is clean."
+        assert result["completed"] is True
+        assert result["cognition_trace"] is not None
+        assert result["cognition_trace"]["autonomy"]["enabled"] is False
+
+
 class TestConsistencyGuardWiring:
     """PR3 wiring: post-generation guard runs based on verification_plan,
     revises final_response when full guard says revise, stays non-fatal,

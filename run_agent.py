@@ -77,6 +77,10 @@ from hermes_constants import OPENROUTER_BASE_URL
 # Agent internals extracted to agent/ package for modularity
 from agent.memory_manager import build_memory_context_block
 from agent.cognition_trace import build_cognition_turn_trace
+from agent.autonomy_telemetry import (
+    build_autonomy_metadata,
+    build_autonomy_telemetry_from_metadata,
+)
 from agent.process_monitor import (
     assess_claims,
     build_process_monitor_metadata,
@@ -10807,6 +10811,24 @@ class AIAgent:
             except Exception as exc:
                 logger.warning(
                     "process_monitor raised (non-fatal): %s", exc
+                )
+
+        # ── Autonomy / self-model telemetry (PR18) ───────────────────────
+        # Observation only: derive bounded autonomy metadata from the current
+        # turn signals after process/plasticity metadata has settled and before
+        # the nested trace snapshot is built. It must never mutate the response
+        # or grant additional execution authority.
+        if isinstance(self._current_turn_cognition_metadata, dict):
+            try:
+                _autonomy_telemetry = build_autonomy_telemetry_from_metadata(
+                    self._current_turn_cognition_metadata
+                )
+                self._current_turn_cognition_metadata.update(
+                    build_autonomy_metadata(_autonomy_telemetry)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "autonomy_telemetry raised (non-fatal): %s", exc
                 )
 
         # ── Cognition turn trace snapshot (PR7) ──────────────────────────
