@@ -175,3 +175,36 @@ def test_builder_does_not_mutate_metadata():
 
     assert metadata == before
     assert trace["route"]["routing_reasons"] == ["semantic_needed"]
+
+
+def test_policy_metadata_defaults_when_absent():
+    trace = build_cognition_turn_trace({"mode": "standard"})
+
+    assert trace["policy"] == {
+        "enabled": False,
+        "count": 0,
+        "policy_ids": [],
+        "citations": [],
+        "categories": [],
+    }
+
+
+def test_policy_metadata_is_grouped():
+    trace = build_cognition_turn_trace(
+        {
+            "mode": "deep",
+            "policy_memory_enabled": True,
+            "policy_memory_count": 2,
+            "policy_memory_ids": ("send-guard", "privacy"),
+            "policy_memory_citations": ("policy:send-guard@1", "policy:privacy@2"),
+            "policy_memory_categories": ("external_action", "privacy"),
+        }
+    )
+
+    assert trace["policy"] == {
+        "enabled": True,
+        "count": 2,
+        "policy_ids": ["send-guard", "privacy"],
+        "citations": ["policy:send-guard@1", "policy:privacy@2"],
+        "categories": ["external_action", "privacy"],
+    }

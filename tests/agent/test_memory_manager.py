@@ -10,6 +10,7 @@ import pytest
 from agent.memory_manager import MemoryManager
 from agent.memory_provider import MemoryProvider
 from agent.memory_ranker import MemoryCandidate, MemoryObjectMetadata, MemoryRankerConfig
+from agent.policy_memory import PolicyMemoryItem
 
 
 # ---------------------------------------------------------------------------
@@ -393,3 +394,106 @@ class TestMemoryObjectMetadataManager:
         result = mgr.describe_memory_metadata_support()
 
         assert result == {"providers": {"good": {"version": 1}}}
+
+
+class _PolicyProvider(_CandidateProvider):
+    def __init__(self, name: str = "policy-provider", candidates=None, policy_items=None):
+        super().__init__(name=name, candidates=candidates)
+        self._policy_items = list(policy_items or [])
+        self.policy_calls: list[tuple[str, str]] = []
+
+    def prefetch_policy_items(self, query: str, *, session_id: str = ""):
+        self.policy_calls.append((query, session_id))
+        return list(self._policy_items)
+
+
+class _PolicyRaisingProvider(_CandidateProvider):
+    def prefetch_policy_items(self, query: str, *, session_id: str = ""):
+        raise RuntimeError("policy broken")
+
+
+class TestPolicyMemoryManager:
+    def test_prefetch_policy_for_query_returns_context_and_metadata(self):
+        provider = _PolicyProvider(
+            policy_items=[
+                PolicyMemoryItem(
+                    "email-guard",
+                    "Email guard",
+                    "Do not send email from scheduled reports.",
+                    category="external_action",
+                    priority=90,
+                    source_trace=("USER.md",),
+                    tags=("email", "send"),
+                )
+            ]
+        )
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        context, metadata = mgr.prefetch_policy_for_query(
+            "send email report", session_id="sess", max_items=5
+        )
+
+        assert "policy:email-guard@1" in context
+        assert "Do not send email" in context
+        assert metadata["count"] == 1
+        assert metadata["policy_ids"] == ["email-guard"]
+        assert metadata["citations"] == ["policy:email-guard@1"]
+        assert metadata["categories"] == ["external_action"]
+        assert provider.policy_calls == [("send email report", "sess")]
+        assert mgr.last_policy_recall_metadata == metadata
+
+    def test_prefetch_policy_for_query_provider_exception_is_non_fatal(self):
+        boom = _PolicyRaisingProvider(name="boom")
+        good = _PolicyProvider(
+            name="good",
+            policy_items=[PolicyMemoryItem("privacy", "Privacy", "Private data stays private", category="privacy")],
+        )
+        mgr = MemoryManager()
+        mgr._providers.extend([boom, good])
+
+        context, metadata = mgr.prefetch_policy_for_query("private data", session_id="s")
+
+        assert "Private data stays private" in context
+        assert metadata["policy_ids"] == ["privacy"]
+
+    def test_ranked_prefetch_includes_policy_candidate_when_principles_layer_requested(self):
+        provider = _PolicyProvider(
+            policy_items=[
+                PolicyMemoryItem(
+                    "send-guard",
+                    "Send guard",
+                    "Confirm before sending email.",
+                    category="external_action",
+                    priority=95,
+                    tags=("send", "email"),
+                )
+            ]
+        )
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        result = mgr.prefetch_ranked_for_policy(
+            "send email", layers=("principles", "semantic"), session_id="s"
+        )
+
+        assert "Confirm before sending email." in result
+        assert "provider=policy" in result
+        assert "source=policy:send-guard" in result
+        assert "source_trace=policy:send-guard" in result
+        assert mgr.last_policy_recall_metadata["policy_ids"] == ["send-guard"]
+
+    def test_ranked_prefetch_skips_policy_when_principles_layer_absent(self):
+        provider = _PolicyProvider(
+            policy_items=[PolicyMemoryItem("send-guard", "Send guard", "Confirm before sending email.")]
+        )
+        mgr = MemoryManager()
+        mgr.add_provider(provider)
+
+        result = mgr.prefetch_ranked_for_policy(
+            "send email", layers=("semantic",), session_id="s"
+        )
+
+        assert "Confirm before sending email." not in result
+        assert provider.policy_calls == []
+        assert mgr.last_policy_recall_metadata["count"] == 0

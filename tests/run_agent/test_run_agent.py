@@ -4367,6 +4367,13 @@ def _install_memory_manager_spy(agent):
     spy.prefetch_all = MagicMock(return_value="")
     spy.prefetch_for_policy = MagicMock(return_value="")
     spy.prefetch_ranked_for_policy = MagicMock(return_value="")
+    spy.last_policy_recall_metadata = {
+        "enabled": True,
+        "count": 1,
+        "policy_ids": ["send-guard"],
+        "citations": ["policy:send-guard@1"],
+        "categories": ["external_action"],
+    }
     # Other manager methods called during the turn must be no-ops.
     spy.queue_prefetch_all = MagicMock()
     spy.sync_all = MagicMock()
@@ -4476,9 +4483,24 @@ class TestLayeredRetrievalPrefetch:
         spy.prefetch_for_policy.assert_not_called()
         spy.prefetch_ranked_for_policy.assert_not_called()
 
+    def test_policy_recall_metadata_is_copied_into_cognition_metadata(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        spy = _install_memory_manager_spy(agent)
+
+        result = _run_one_turn(agent, "please send email")
+
+        spy.prefetch_ranked_for_policy.assert_called_once()
+        assert result["cognition_metadata"]["policy_memory_enabled"] is True
+        assert result["cognition_metadata"]["policy_memory_count"] == 1
+        assert result["cognition_metadata"]["policy_memory_ids"] == ["send-guard"]
+        assert result["cognition_metadata"]["policy_memory_citations"] == ["policy:send-guard@1"]
+        assert result["cognition_metadata"]["policy_memory_categories"] == ["external_action"]
+        assert result["cognition_trace"]["policy"]["policy_ids"] == ["send-guard"]
+
+
 # ===================================================================
-# Consistency guard wire-through (PR3)
-# ===================================================================
+
 
 
 def _drive_simple_turn(agent, message: str, *, content: str = "candidate"):
