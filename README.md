@@ -41,7 +41,26 @@ What this branch adds:
 - **Process monitor and autonomy telemetry** — deterministic observation-only metadata summarizes routing, retrieval, verification, policy recall, uncertainty, and autonomy signals without giving the agent new powers by itself.
 - **Cognition trace tooling** — trajectory metadata and offline reports make it possible to inspect whether cognition routing and verification actually ran.
 
-The cognition layer is intentionally **off by default** for compatibility. To try it, install this branch and enable it in `~/.hermes/config.yaml`:
+Why try it:
+
+| Feature | Benefit |
+|---|---|
+| **More adaptive effort** | Short factual turns can stay brief and cheap, while historical, architectural, code, and risky-action turns automatically receive deeper handling. |
+| **Better long-context behavior** | Retrieval is no longer just "dump more memory into the prompt". The agent can request specific layers and rank candidates before they become context. |
+| **More auditable memory** | Memory objects can explain where they came from, how confident they are, when they were last verified, and whether another memory supersedes them. |
+| **Clearer safety boundaries** | Policy memories make privacy, external-action, workflow, and style constraints easier to recall and cite during a turn. |
+| **Less silent overconfidence** | Uncertainty and verification metadata let the runtime distinguish fast answers from turns that should be checked more carefully. |
+| **Research-friendly traces** | `cognition_trace` metadata makes cognition behavior inspectable after the fact, so experiments can compare routes, retrieval, verification, and outcomes. |
+
+Expected behavior changes when enabled:
+
+- Simple prompts should usually produce shorter, faster responses.
+- Project status, previous-work, root-cause, code-change, and architecture prompts should be less likely to be misclassified as trivial chat.
+- Deep/risky turns may attach retrieval plans, verification plans, consistency-guard metadata, policy recall summaries, and autonomy telemetry.
+- The stack is deterministic and observation-first where possible; telemetry does not grant new external-action permissions by itself.
+- If `save_trajectories: true` is enabled, completed turns can include persisted cognition traces for debugging and evaluation.
+
+The cognition layer is intentionally **off by default** for compatibility. To try it, install this fork and enable it in `~/.hermes/config.yaml`:
 
 ```yaml
 cognition:
@@ -62,10 +81,10 @@ cognition:
 save_trajectories: true
 ```
 
-Try the preview branch:
+Try the fork:
 
 ```bash
-git clone -b cognition-preview-public https://github.com/wuming2007/hermes-agent.git
+git clone https://github.com/wuming2007/hermes-agent.git
 cd hermes-agent
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv venv --python 3.11
