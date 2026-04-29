@@ -2,15 +2,15 @@
 """
 Image Generation Tools Module
 
-This module provides image generation tools using FAL.ai's FLUX 2 Pro model with 
-automatic upscaling via FAL.ai's Clarity Upscaler for enhanced image quality.
+This module provides image generation tools using either Google Gemini Imagen
+or FAL.ai's FLUX 2 Pro model with optional FAL upscaling.
 
 Available tools:
 - image_generate_tool: Generate images from text prompts with automatic upscaling
 
 Features:
-- High-quality image generation using FLUX 2 Pro model
-- Automatic 2x upscaling using Clarity Upscaler for enhanced quality
+- High-quality image generation using Gemini Imagen when a Google API key is available
+- FAL.ai FLUX 2 Pro fallback with automatic Clarity Upscaler
 - Comprehensive parameter control (size, steps, guidance, etc.)
 - Proper error handling and validation with fallback to original images
 - Debug logging support
@@ -28,15 +28,20 @@ Usage:
     )
 """
 
+import base64
 import json
 import logging
 import os
 import datetime
 import threading
 import uuid
+from pathlib import Path
 from typing import Dict, Any, Optional, Union
 from urllib.parse import urlencode
+
 import fal_client
+import requests
+from hermes_constants import get_hermes_home
 from tools.debug_helpers import DebugSession
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import managed_nous_tools_enabled
@@ -45,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration for image generation
 DEFAULT_MODEL = "fal-ai/flux-2-pro"
+DEFAULT_GEMINI_IMAGE_MODEL = "imagen-4.0-generate-001"
 DEFAULT_ASPECT_RATIO = "landscape"
 DEFAULT_NUM_INFERENCE_STEPS = 50
 DEFAULT_GUIDANCE_SCALE = 4.5
@@ -60,6 +66,12 @@ ASPECT_RATIO_MAP = {
     "landscape": "landscape_16_9",
     "square": "square_hd",
     "portrait": "portrait_16_9"
+}
+
+GEMINI_ASPECT_RATIO_MAP = {
+    "landscape": "16:9",
+    "square": "1:1",
+    "portrait": "9:16",
 }
 
 # Configuration for automatic upscaling
@@ -214,6 +226,88 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
     )
 
 
+def _get_google_image_api_key() -> Optional[str]:
+    """Return the configured Google/Gemini API key without logging it."""
+    return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+
+def _get_image_generation_provider() -> str:
+    """Resolve image backend: explicit env override, otherwise prefer Gemini when available."""
+    forced = (os.getenv("IMAGE_GENERATION_PROVIDER") or os.getenv("HERMES_IMAGE_PROVIDER") or "").strip().lower()
+    if forced in {"gemini", "google", "imagen"}:
+        return "gemini"
+    if forced in {"fal", "flux", "flux2", "flux-2"}:
+        return "fal"
+    if _get_google_image_api_key():
+        return "gemini"
+    return "fal"
+
+
+def _get_gemini_image_model() -> str:
+    return os.getenv("GEMINI_IMAGE_MODEL") or os.getenv("GOOGLE_IMAGE_MODEL") or DEFAULT_GEMINI_IMAGE_MODEL
+
+
+def _generated_images_dir() -> Path:
+    path = get_hermes_home() / "generated-images"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _extract_gemini_image(result: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    """Extract either an image URL or base64 image data from Gemini Imagen responses."""
+    predictions = result.get("predictions") or []
+    if not predictions:
+        raise ValueError("Invalid response from Gemini Imagen API - no predictions returned")
+    first = predictions[0] or {}
+    url = first.get("imageUrl") or first.get("url")
+    if url:
+        return {"url": url, "base64": None, "mime_type": first.get("mimeType") or "image/png"}
+    b64 = (
+        first.get("bytesBase64Encoded")
+        or first.get("image", {}).get("bytesBase64Encoded")
+        or first.get("imageBytes")
+    )
+    if not b64:
+        raise ValueError("Gemini Imagen response did not contain image URL or base64 image bytes")
+    return {"url": None, "base64": b64, "mime_type": first.get("mimeType") or first.get("image", {}).get("mimeType") or "image/png"}
+
+
+def _save_gemini_base64_image(base64_data: str, mime_type: str = "image/png") -> str:
+    ext = "jpg" if "jpeg" in (mime_type or "").lower() else "png"
+    output_path = _generated_images_dir() / f"gemini-imagen-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.{ext}"
+    output_path.write_bytes(base64.b64decode(base64_data))
+    return str(output_path)
+
+
+def _generate_gemini_image(prompt: str, aspect_ratio: str, num_images: int, output_format: str) -> Dict[str, Any]:
+    """Generate an image through the Google Generative Language Imagen REST API."""
+    api_key = _get_google_image_api_key()
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY environment variable not set")
+
+    aspect_ratio_lower = aspect_ratio.lower().strip() if aspect_ratio else DEFAULT_ASPECT_RATIO
+    if aspect_ratio_lower not in GEMINI_ASPECT_RATIO_MAP:
+        logger.warning("Invalid aspect_ratio '%s', defaulting to '%s'", aspect_ratio, DEFAULT_ASPECT_RATIO)
+        aspect_ratio_lower = DEFAULT_ASPECT_RATIO
+
+    model = _get_gemini_image_model()
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:predict"
+    payload = {
+        "instances": [{"prompt": prompt.strip()}],
+        "parameters": {
+            "sampleCount": max(1, min(int(num_images or 1), 4)),
+            "aspectRatio": GEMINI_ASPECT_RATIO_MAP[aspect_ratio_lower],
+            "outputOptions": {"mimeType": "image/jpeg" if output_format == "jpeg" else "image/png"},
+        },
+    }
+    logger.info("Submitting generation request to Gemini Imagen model %s", model)
+    response = requests.post(url, params={"key": api_key}, json=payload, timeout=180)
+    response.raise_for_status()
+    extracted = _extract_gemini_image(response.json())
+    image = extracted["url"] or _save_gemini_base64_image(extracted["base64"], extracted.get("mime_type") or "image/png")
+    return {"success": True, "image": image}
+
+
 def _validate_parameters(
     image_size: Union[str, Dict[str, int]], 
     num_inference_steps: int,
@@ -348,6 +442,74 @@ def _upscale_image(image_url: str, original_prompt: str) -> Dict[str, Any]:
         return None
 
 
+def _generate_fal_image(
+    prompt: str,
+    aspect_ratio: str = DEFAULT_ASPECT_RATIO,
+    num_inference_steps: int = DEFAULT_NUM_INFERENCE_STEPS,
+    guidance_scale: float = DEFAULT_GUIDANCE_SCALE,
+    num_images: int = DEFAULT_NUM_IMAGES,
+    output_format: str = DEFAULT_OUTPUT_FORMAT,
+    seed: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Generate an image through FAL.ai FLUX 2 Pro and return a result dict."""
+    aspect_ratio_lower = aspect_ratio.lower().strip() if aspect_ratio else DEFAULT_ASPECT_RATIO
+    if aspect_ratio_lower not in ASPECT_RATIO_MAP:
+        logger.warning("Invalid aspect_ratio '%s', defaulting to '%s'", aspect_ratio, DEFAULT_ASPECT_RATIO)
+        aspect_ratio_lower = DEFAULT_ASPECT_RATIO
+    image_size = ASPECT_RATIO_MAP[aspect_ratio_lower]
+
+    if not (os.getenv("FAL_KEY") or _resolve_managed_fal_gateway()):
+        message = "FAL_KEY environment variable not set"
+        if managed_nous_tools_enabled():
+            message += " and managed FAL gateway is unavailable"
+        raise ValueError(message)
+
+    validated_params = _validate_parameters(
+        image_size, num_inference_steps, guidance_scale, num_images, output_format, "none"
+    )
+    arguments = {
+        "prompt": prompt.strip(),
+        "image_size": validated_params["image_size"],
+        "num_inference_steps": validated_params["num_inference_steps"],
+        "guidance_scale": validated_params["guidance_scale"],
+        "num_images": validated_params["num_images"],
+        "output_format": validated_params["output_format"],
+        "enable_safety_checker": ENABLE_SAFETY_CHECKER,
+        "safety_tolerance": SAFETY_TOLERANCE,
+        "sync_mode": True,
+    }
+    if seed is not None and isinstance(seed, int):
+        arguments["seed"] = seed
+
+    logger.info("Submitting generation request to FAL.ai FLUX 2 Pro...")
+    handler = _submit_fal_request(DEFAULT_MODEL, arguments=arguments)
+    result = handler.get()
+    if not result or "images" not in result:
+        raise ValueError("Invalid response from FAL.ai API - no images returned")
+    images = result.get("images", [])
+    if not images:
+        raise ValueError("No images were generated")
+
+    formatted_images = []
+    for img in images:
+        if isinstance(img, dict) and "url" in img:
+            original_image = {
+                "url": img["url"],
+                "width": img.get("width", 0),
+                "height": img.get("height", 0),
+            }
+            upscaled_image = _upscale_image(img["url"], prompt.strip())
+            if upscaled_image:
+                formatted_images.append(upscaled_image)
+            else:
+                logger.warning("Using original image as fallback")
+                original_image["upscaled"] = False
+                formatted_images.append(original_image)
+    if not formatted_images:
+        raise ValueError("No valid image URLs returned from API")
+    return {"success": True, "image": formatted_images[0]["url"]}
+
+
 def image_generate_tool(
     prompt: str,
     aspect_ratio: str = DEFAULT_ASPECT_RATIO,
@@ -358,178 +520,77 @@ def image_generate_tool(
     seed: Optional[int] = None
 ) -> str:
     """
-    Generate images from text prompts using FAL.ai's FLUX 2 Pro model with automatic upscaling.
-    
-    Uses the synchronous fal_client API to avoid event loop lifecycle issues.
-    The async API's global httpx.AsyncClient (cached via @cached_property) breaks
-    when asyncio.run() destroys and recreates event loops between calls, which
-    happens in the gateway's thread-pool pattern.
-    
-    Args:
-        prompt (str): The text prompt describing the desired image
-        aspect_ratio (str): Image aspect ratio - "landscape", "square", or "portrait" (default: "landscape")
-        num_inference_steps (int): Number of denoising steps (1-50, default: 50)
-        guidance_scale (float): How closely to follow prompt (0.1-20.0, default: 4.5)
-        num_images (int): Number of images to generate (1-4, default: 1)
-        output_format (str): Image format "jpeg" or "png" (default: "png")
-        seed (Optional[int]): Random seed for reproducible results (optional)
-    
-    Returns:
-        str: JSON string containing minimal generation results:
-             {
-                 "success": bool,
-                 "image": str or None  # URL of the upscaled image, or None if failed
-             }
+    Generate an image using the configured provider.
+
+    Provider resolution:
+    - IMAGE_GENERATION_PROVIDER/HERMES_IMAGE_PROVIDER=gemini|fal forces a backend.
+    - Otherwise Gemini Imagen is preferred when GOOGLE_API_KEY/GEMINI_API_KEY exists.
+    - FAL.ai FLUX 2 Pro remains the fallback.
+
+    Returns JSON: {"success": bool, "image": str or None} where image is a URL
+    or a local generated image path for Gemini base64 responses.
     """
-    # Validate and map aspect_ratio to actual image_size
-    aspect_ratio_lower = aspect_ratio.lower().strip() if aspect_ratio else DEFAULT_ASPECT_RATIO
-    if aspect_ratio_lower not in ASPECT_RATIO_MAP:
-        logger.warning("Invalid aspect_ratio '%s', defaulting to '%s'", aspect_ratio, DEFAULT_ASPECT_RATIO)
-        aspect_ratio_lower = DEFAULT_ASPECT_RATIO
-    image_size = ASPECT_RATIO_MAP[aspect_ratio_lower]
-    
     debug_call_data = {
         "parameters": {
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
-            "image_size": image_size,
             "num_inference_steps": num_inference_steps,
             "guidance_scale": guidance_scale,
             "num_images": num_images,
             "output_format": output_format,
-            "seed": seed
+            "seed": seed,
         },
+        "provider": None,
         "error": None,
         "success": False,
         "images_generated": 0,
-        "generation_time": 0
+        "generation_time": 0,
     }
-    
     start_time = datetime.datetime.now()
-    
+
     try:
-        logger.info("Generating %s image(s) with FLUX 2 Pro: %s", num_images, prompt[:80])
-        
-        # Validate prompt
         if not prompt or not isinstance(prompt, str) or len(prompt.strip()) == 0:
             raise ValueError("Prompt is required and must be a non-empty string")
-        
-        # Check API key availability
-        if not (os.getenv("FAL_KEY") or _resolve_managed_fal_gateway()):
-            message = "FAL_KEY environment variable not set"
-            if managed_nous_tools_enabled():
-                message += " and managed FAL gateway is unavailable"
-            raise ValueError(message)
-        
-        # Validate other parameters
-        validated_params = _validate_parameters(
-            image_size, num_inference_steps, guidance_scale, num_images, output_format, "none"
-        )
-        
-        # Prepare arguments for FAL.ai FLUX 2 Pro API
-        arguments = {
-            "prompt": prompt.strip(),
-            "image_size": validated_params["image_size"],
-            "num_inference_steps": validated_params["num_inference_steps"],
-            "guidance_scale": validated_params["guidance_scale"],
-            "num_images": validated_params["num_images"],
-            "output_format": validated_params["output_format"],
-            "enable_safety_checker": ENABLE_SAFETY_CHECKER,
-            "safety_tolerance": SAFETY_TOLERANCE,
-            "sync_mode": True  # Use sync mode for immediate results
-        }
-        
-        # Add seed if provided
-        if seed is not None and isinstance(seed, int):
-            arguments["seed"] = seed
-        
-        logger.info("Submitting generation request to FAL.ai FLUX 2 Pro...")
-        logger.info("  Model: %s", DEFAULT_MODEL)
-        logger.info("  Aspect Ratio: %s -> %s", aspect_ratio_lower, image_size)
-        logger.info("  Steps: %s", validated_params['num_inference_steps'])
-        logger.info("  Guidance: %s", validated_params['guidance_scale'])
-        
-        # Submit request to FAL.ai using sync API (avoids cached event loop issues)
-        handler = _submit_fal_request(
-            DEFAULT_MODEL,
-            arguments=arguments,
-        )
-        
-        # Get the result (sync — blocks until done)
-        result = handler.get()
-        
+
+        provider = _get_image_generation_provider()
+        debug_call_data["provider"] = provider
+        logger.info("Generating image with %s provider: %s", provider, prompt[:80])
+
+        if provider == "gemini":
+            response_data = _generate_gemini_image(prompt, aspect_ratio, num_images, output_format)
+        else:
+            response_data = _generate_fal_image(
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                num_images=num_images,
+                output_format=output_format,
+                seed=seed,
+            )
+
         generation_time = (datetime.datetime.now() - start_time).total_seconds()
-        
-        # Process the response
-        if not result or "images" not in result:
-            raise ValueError("Invalid response from FAL.ai API - no images returned")
-        
-        images = result.get("images", [])
-        if not images:
-            raise ValueError("No images were generated")
-        
-        # Format image data and upscale images
-        formatted_images = []
-        for img in images:
-            if isinstance(img, dict) and "url" in img:
-                original_image = {
-                    "url": img["url"],
-                    "width": img.get("width", 0),
-                    "height": img.get("height", 0)
-                }
-                
-                # Attempt to upscale the image
-                upscaled_image = _upscale_image(img["url"], prompt.strip())
-                
-                if upscaled_image:
-                    # Use upscaled image if successful
-                    formatted_images.append(upscaled_image)
-                else:
-                    # Fall back to original image if upscaling fails
-                    logger.warning("Using original image as fallback")
-                    original_image["upscaled"] = False
-                    formatted_images.append(original_image)
-        
-        if not formatted_images:
-            raise ValueError("No valid image URLs returned from API")
-        
-        upscaled_count = sum(1 for img in formatted_images if img.get("upscaled", False))
-        logger.info("Generated %s image(s) in %.1fs (%s upscaled)", len(formatted_images), generation_time, upscaled_count)
-        
-        # Prepare successful response - minimal format
-        response_data = {
-            "success": True,
-            "image": formatted_images[0]["url"] if formatted_images else None
-        }
-        
         debug_call_data["success"] = True
-        debug_call_data["images_generated"] = len(formatted_images)
+        debug_call_data["images_generated"] = 1
         debug_call_data["generation_time"] = generation_time
-        
-        # Log debug information
         _debug.log_call("image_generate_tool", debug_call_data)
         _debug.save()
-        
         return json.dumps(response_data, indent=2, ensure_ascii=False)
-        
+
     except Exception as e:
         generation_time = (datetime.datetime.now() - start_time).total_seconds()
         error_msg = f"Error generating image: {str(e)}"
         logger.error("%s", error_msg, exc_info=True)
-        
-        # Include error details so callers can diagnose failures
         response_data = {
             "success": False,
             "image": None,
             "error": str(e),
             "error_type": type(e).__name__,
         }
-        
         debug_call_data["error"] = error_msg
         debug_call_data["generation_time"] = generation_time
         _debug.log_call("image_generate_tool", debug_call_data)
         _debug.save()
-        
         return json.dumps(response_data, indent=2, ensure_ascii=False)
 
 
@@ -545,20 +606,18 @@ def check_fal_api_key() -> bool:
 
 def check_image_generation_requirements() -> bool:
     """
-    Check if all requirements for image generation tools are met.
+    Check if Gemini Imagen or FAL requirements for image generation tools are met.
     
     Returns:
         bool: True if requirements are met, False otherwise
     """
+    if _get_google_image_api_key():
+        return True
     try:
-        # Check API key
         if not check_fal_api_key():
             return False
-        
-        # Check if fal_client is available
         import fal_client  # noqa: F401 — SDK presence check
         return True
-        
     except ImportError:
         return False
 
@@ -646,7 +705,7 @@ from tools.registry import registry, tool_error
 
 IMAGE_GENERATE_SCHEMA = {
     "name": "image_generate",
-    "description": "Generate high-quality images from text prompts using FLUX 2 Pro model with automatic 2x upscaling. Creates detailed, artistic images that are automatically upscaled for hi-rez results. Returns a single upscaled image URL. Display it using markdown: ![description](URL)",
+    "description": "Generate high-quality images from text prompts using the configured image provider. Prefers Gemini Imagen when GOOGLE_API_KEY/GEMINI_API_KEY is available, with FAL.ai FLUX fallback. Returns a single image URL or local image path. Display it using markdown or MEDIA:path when local.",
     "parameters": {
         "type": "object",
         "properties": {

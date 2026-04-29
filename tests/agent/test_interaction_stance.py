@@ -73,7 +73,7 @@ def test_debate_prompt_is_standard_density():
 
 
 def test_exploration_prompt_is_expanded():
-    stance = _stance("我們來聊聊科技丹道的設計哲學")
+    stance = _stance("Let's explore the design philosophy of cognitive agents")
     assert stance.dialogue_mode == "exploration"
     assert stance.answer_density == "expanded"
 
