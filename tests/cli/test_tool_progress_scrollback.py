@@ -137,6 +137,17 @@ class TestToolProgressScrollback:
         cli._on_tool_progress("tool.started", "terminal", "git status", {"command": "git status"})
         assert "git status" in cli._spinner_text
 
+    def test_spinner_preview_trim_uses_display_width(self):
+        """Wide glyph previews should trim by terminal cell width, not Python len()."""
+        cli = _make_cli(tool_progress="all")
+        wide_preview = "🧪🧪🧪abcdef"
+        with patch("agent.display.get_tool_preview_max_len", return_value=8):
+            cli._on_tool_progress("tool.started", "terminal", wide_preview, {"command": "echo hi"})
+
+        trimmed = cli._spinner_text.split(" ", 1)[1]
+        assert trimmed.endswith("...")
+        assert cli._status_bar_display_width(trimmed) <= 8
+
     def test_spinner_timer_clears_on_completed(self):
         """tool.completed still clears the tool timer."""
         cli = _make_cli(tool_progress="all")

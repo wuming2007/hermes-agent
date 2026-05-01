@@ -3161,7 +3161,8 @@ class HermesCLI:
             except (ValueError, IndexError):
                 self._stream_text_ansi = ""
             w = shutil.get_terminal_size().columns
-            fill = w - 2 - len(label)
+            label_display_width = self._status_bar_display_width(label)
+            fill = w - 2 - label_display_width
             _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
 
         self._stream_buf += text
@@ -8103,8 +8104,8 @@ class HermesCLI:
             label = preview or function_name
             from agent.display import get_tool_preview_max_len
             _pl = get_tool_preview_max_len()
-            if _pl > 0 and len(label) > _pl:
-                label = label[:_pl - 3] + "..."
+            if _pl > 0:
+                label = self._trim_status_bar_text(label, _pl)
             self._spinner_text = f"{emoji} {label}"
             self._tool_start_time = time.monotonic()
             # Store args for stacked scrollback line on completion
@@ -9169,7 +9170,7 @@ class HermesCLI:
                         _streaming_box_opened = True
                         w = self.console.width
                         label = " ⚕ Hermes "
-                        fill = w - 2 - len(label)
+                        fill = w - 2 - self._status_bar_display_width(label)
                         _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
                     _cprint(f"{_STREAM_PAD}{sentence.rstrip()}")
 
