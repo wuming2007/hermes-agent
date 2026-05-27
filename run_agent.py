@@ -7143,6 +7143,11 @@ class AIAgent:
                 with active_client.responses.stream(**api_kwargs) as stream:
                     for event in stream:
                         self._touch_activity("receiving stream response")
+                        # Update stream-liveness watchdog timestamp — the
+                        # outer _interruptible_api_call watchdog uses this
+                        # (instead of pure wall-clock) to avoid killing
+                        # slow-but-progressing reasoning runs.
+                        self._last_stream_event_ts = time.time()
                         if self._interrupt_requested:
                             break
                         event_type = getattr(event, "type", "")
@@ -7811,6 +7816,13 @@ class AIAgent:
         def _call():
             try:
                 if self.api_mode == "codex_responses":
+                    # Arm stream-liveness watchdog before issuing the request.
+                    # _run_codex_stream updates this on every SSE event; the
+                    # main thread's stale detector uses it instead of total
+                    # wall-clock so long reasoning (e.g. gpt-5.5 deep mode
+                    # multi-minute pauses between user-visible output) isn't
+                    # killed when the stream is still healthy.
+                    self._last_stream_event_ts = time.time()
                     request_client_holder["client"] = self._create_request_openai_client(
                         reason="codex_stream_request",
                         api_kwargs=api_kwargs,
@@ -7886,20 +7898,34 @@ class AIAgent:
                     f"waiting for non-streaming response ({int(_elapsed)}s elapsed)"
                 )
 
-            # Stale-call detector: kill the connection if no response
-            # arrives within the configured timeout.
-            _elapsed = time.time() - _call_start
-            if _elapsed > _stale_timeout:
+            # Stale-call detector. Two modes:
+            #   * codex_responses: measure silence since the last SSE event.
+            #     gpt-5.5 deep reasoning can take many minutes between visible
+            #     output but is still healthy as long as the stream keeps
+            #     emitting events. Wall-clock would falsely kill these calls.
+            #   * everything else: measure total wall-clock since the call
+            #     started (non-streaming providers return nothing until done).
+            if self.api_mode == "codex_responses":
+                _last_event_ts = getattr(self, "_last_stream_event_ts", None) or _call_start
+                _stale_metric = time.time() - _last_event_ts
+                _stale_kind = "no SSE events"
+            else:
+                _stale_metric = time.time() - _call_start
+                _stale_kind = "non-streaming"
+            if _stale_metric > _stale_timeout:
                 _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
                 logger.warning(
-                    "Non-streaming API call stale for %.0fs (threshold %.0fs). "
+                    "API call stale (%s) for %.0fs (threshold %.0fs). "
                     "model=%s context=~%s tokens. Killing connection.",
-                    _elapsed, _stale_timeout,
+                    _stale_kind, _stale_metric, _stale_timeout,
                     api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
                 )
+                _label = (
+                    "stream events" if self.api_mode == "codex_responses" else "response"
+                )
                 self._emit_status(
-                    f"⚠️ No response from provider for {int(_elapsed)}s "
-                    f"(non-streaming, model: {api_kwargs.get('model', 'unknown')}). "
+                    f"⚠️ No {_label} from provider for {int(_stale_metric)}s "
+                    f"(model: {api_kwargs.get('model', 'unknown')}). "
                     f"Aborting call."
                 )
                 try:
@@ -7913,14 +7939,15 @@ class AIAgent:
                 except Exception:
                     pass
                 self._touch_activity(
-                    f"stale non-streaming call killed after {int(_elapsed)}s"
+                    f"stale call killed after {int(_stale_metric)}s ({_stale_kind})"
                 )
                 # Wait briefly for the thread to notice the closed connection.
                 t.join(timeout=2.0)
                 if result["error"] is None and result["response"] is None:
                     result["error"] = TimeoutError(
-                        f"Non-streaming API call timed out after {int(_elapsed)}s "
-                        f"with no response (threshold: {int(_stale_timeout)}s)"
+                        f"API call timed out: {int(_stale_metric)}s {_stale_kind} "
+                        f"(threshold: {int(_stale_timeout)}s, model: "
+                        f"{api_kwargs.get('model', 'unknown')})"
                     )
                 break
 
