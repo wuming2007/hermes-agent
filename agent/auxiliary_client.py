@@ -780,22 +780,77 @@ class _CodexCompletionsAdapter:
                 timeout_timer.daemon = True
                 timeout_timer.start()
             _check_cancelled()
-            with self._client.responses.stream(**resp_kwargs) as stream:
-                for _event in stream:
+            try:
+                with self._client.responses.stream(**resp_kwargs) as stream:
+                    for _event in stream:
+                        _check_cancelled()
+                        _etype = getattr(_event, "type", "")
+                        if _etype == "response.output_item.done":
+                            _done = getattr(_event, "item", None)
+                            if _done is not None:
+                                collected_output_items.append(_done)
+                        elif "output_text.delta" in _etype:
+                            _delta = getattr(_event, "delta", "")
+                            if _delta:
+                                collected_text_deltas.append(_delta)
+                        elif "function_call" in _etype:
+                            has_function_calls = True
                     _check_cancelled()
-                    _etype = getattr(_event, "type", "")
-                    if _etype == "response.output_item.done":
-                        _done = getattr(_event, "item", None)
-                        if _done is not None:
-                            collected_output_items.append(_done)
-                    elif "output_text.delta" in _etype:
-                        _delta = getattr(_event, "delta", "")
-                        if _delta:
-                            collected_text_deltas.append(_delta)
-                    elif "function_call" in _etype:
-                        has_function_calls = True
-                _check_cancelled()
-                final = stream.get_final_response()
+                    final = stream.get_final_response()
+            except TypeError as type_err:
+                # OpenAI SDK accumulator (lib/_parsing/_responses.py) does
+                # `for output in response.output:` without a None guard.
+                # On chatgpt.com/backend-api/codex the intermediate snapshot
+                # can have response.output == None (notably short SSE
+                # responses that skip output_text.delta events — common for
+                # auxiliary title generation). Fall back to raw create
+                # (stream=True) which doesn't run the SDK accumulator.
+                logger.debug(
+                    "Codex auxiliary SDK accumulator None-iter; falling back to raw stream: %s",
+                    type_err,
+                )
+                collected_output_items.clear()
+                collected_text_deltas.clear()
+                has_function_calls = False
+                raw_kwargs = dict(resp_kwargs)
+                raw_kwargs["stream"] = True
+                raw_stream = self._client.responses.create(**raw_kwargs)
+                final = None
+                try:
+                    for _event in raw_stream:
+                        _check_cancelled()
+                        _etype = getattr(_event, "type", None)
+                        if not _etype and isinstance(_event, dict):
+                            _etype = _event.get("type")
+                        if _etype == "response.output_item.done":
+                            _done = getattr(_event, "item", None)
+                            if _done is None and isinstance(_event, dict):
+                                _done = _event.get("item")
+                            if _done is not None:
+                                collected_output_items.append(_done)
+                        elif _etype and "output_text.delta" in _etype:
+                            _delta = getattr(_event, "delta", "")
+                            if not _delta and isinstance(_event, dict):
+                                _delta = _event.get("delta", "")
+                            if _delta:
+                                collected_text_deltas.append(_delta)
+                        elif _etype and "function_call" in _etype:
+                            has_function_calls = True
+                        if _etype in ("response.completed", "response.incomplete", "response.failed"):
+                            final = getattr(_event, "response", None)
+                            if final is None and isinstance(_event, dict):
+                                final = _event.get("response")
+                finally:
+                    close_fn = getattr(raw_stream, "close", None)
+                    if callable(close_fn):
+                        try:
+                            close_fn()
+                        except Exception:
+                            pass
+                if final is None:
+                    raise RuntimeError(
+                        "Codex auxiliary raw-stream fallback did not emit a terminal response"
+                    )
 
             # Backfill empty output from collected stream events
             _output = getattr(final, "output", None)
