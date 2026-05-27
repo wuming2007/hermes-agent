@@ -140,6 +140,23 @@ from tools.browser_tool import cleanup_browser
 # Agent internals extracted to agent/ package for modularity
 from agent.memory_manager import StreamingContextScrubber, build_memory_context_block, sanitize_context
 from agent.think_scrubber import StreamingThinkScrubber
+from agent.cognition_trace import build_cognition_turn_trace
+from agent.autonomy_telemetry import (
+    build_autonomy_metadata,
+    build_autonomy_telemetry_from_metadata,
+)
+from agent.process_monitor import (
+    assess_claims,
+    build_process_monitor_metadata,
+    extract_claims_from_response,
+)
+from agent.consistency_guard import (
+    resolve_verification_ladder,
+    resolve_verification_plan,
+    run_full_consistency_check,
+    run_light_consistency_check,
+    should_run_consistency_guard,
+)
 from agent.retry_utils import jittered_backoff
 from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
@@ -2124,6 +2141,17 @@ class AIAgent:
         except (TypeError, ValueError):
             _api_retries = 3
         self._api_max_retries = _api_retries
+
+        # Cognitive routing scaffold (PR1). Disabled by default; when enabled,
+        # each turn gets classified into fast/standard/deep with retrieval and
+        # verification metadata for downstream layers to consume.
+        # Loaded via the shared PR4 helper so AIAgent / CLI / gateway / cron
+        # apply identical normalization (malformed sub-blocks → {}, etc.).
+        from agent.cognition_config import get_cognition_config as _get_cognition_config
+
+        self._cognition_config = _get_cognition_config(_agent_cfg)
+        self._current_cognitive_route = None
+        self._current_turn_cognition_metadata: Dict[str, Any] = {}
 
         # Initialize context compressor for automatic context management
         # Compresses conversation when approaching model's context limit
@@ -5006,7 +5034,12 @@ class AIAgent:
             return
         
         trajectory = self._convert_to_trajectory_format(messages, user_query, completed)
-        _save_trajectory_to_file(trajectory, self.model, completed)
+        metadata = None
+        if isinstance(self._current_turn_cognition_metadata, dict):
+            cognition_trace = self._current_turn_cognition_metadata.get("cognition_trace")
+            if cognition_trace is not None:
+                metadata = {"cognition_trace": cognition_trace}
+        _save_trajectory_to_file(trajectory, self.model, completed, metadata=metadata)
 
     @staticmethod
     def _is_entitlement_failure(
@@ -9191,6 +9224,146 @@ class AIAgent:
             logging.error("Failed to activate fallback %s: %s", fb_model, e)
             return self._try_activate_fallback()  # try next in chain
 
+    # ── Per-turn cognitive routing (PR1) ────────────────────────────────
+
+    def _resolve_current_cognitive_route(
+        self,
+        original_user_message: Any,
+        messages: List[Dict[str, Any]],
+    ) -> None:
+        """Compute and store the cognitive route for the current turn.
+
+        No-op when cognition is disabled. Stores the resolved
+        ``CognitiveRoute`` (or ``None``) on ``self._current_cognitive_route``
+        and a flat ``dict`` snapshot on
+        ``self._current_turn_cognition_metadata`` for downstream layers
+        (telemetry, smart-model gating, layered retrieval) to consume.
+        """
+        from agent.cognitive_router import CognitiveRoute, resolve_cognitive_route
+        from agent.uncertainty_policy import resolve_uncertainty_decision
+
+        cognition_cfg = self._cognition_config or {}
+        message_text = original_user_message if isinstance(original_user_message, str) else ""
+
+        def _escalated_route(route: CognitiveRoute, target_mode: str | None) -> CognitiveRoute:
+            if target_mode == "standard":
+                return CognitiveRoute(
+                    mode="standard",
+                    retrieval_plan="principles_plus_semantic",
+                    verification_plan="light",
+                    allow_cheap_model=False,
+                    consistency_check=False,
+                    routing_reasons=list(route.routing_reasons) + ["uncertainty_escalated:standard"],
+                    dialogue_mode=route.dialogue_mode,
+                    answer_density=route.answer_density,
+                    stance_reasons=list(route.stance_reasons),
+                )
+            if target_mode == "deep":
+                consistency_cfg = cognition_cfg.get("consistency_guard") or {}
+                consistency_enabled = consistency_cfg.get("enabled", True)
+                return CognitiveRoute(
+                    mode="deep",
+                    retrieval_plan="principles_plus_semantic_plus_episodic",
+                    verification_plan="full",
+                    allow_cheap_model=False,
+                    consistency_check=bool(consistency_enabled),
+                    routing_reasons=list(route.routing_reasons) + ["uncertainty_escalated:deep"],
+                    dialogue_mode=route.dialogue_mode,
+                    answer_density=route.answer_density,
+                    stance_reasons=list(route.stance_reasons),
+                )
+            return route
+
+        try:
+            route = resolve_cognitive_route(
+                user_message=message_text,
+                conversation_history=messages,
+                routing_config=cognition_cfg,
+                agent_state={
+                    "platform": getattr(self, "platform", None),
+                    "model": getattr(self, "model", None),
+                    "provider": getattr(self, "provider", None),
+                },
+            )
+        except Exception as e:  # router must never break the run loop
+            logger.warning("cognitive_router failed; falling back to no route: %s", e)
+            route = None
+
+        uncertainty_decision = None
+        original_mode = route.mode if route is not None else None
+        if route is not None:
+            try:
+                uncertainty_decision = resolve_uncertainty_decision(
+                    user_message=message_text,
+                    cognition_route=route,
+                    routing_config=cognition_cfg,
+                    agent_state={
+                        "platform": getattr(self, "platform", None),
+                        "model": getattr(self, "model", None),
+                        "provider": getattr(self, "provider", None),
+                    },
+                )
+                if uncertainty_decision and uncertainty_decision.escalate_depth:
+                    route = _escalated_route(route, uncertainty_decision.target_mode)
+            except Exception as e:  # uncertainty policy must never break the run loop
+                logger.warning("uncertainty_policy failed; keeping cognitive route: %s", e)
+                uncertainty_decision = None
+
+        self._current_cognitive_route = route
+        if route is None:
+            self._current_turn_cognition_metadata = {"mode": "disabled"}
+        else:
+            # PR1 stores plan strings only; the layered-retrieval rewrite
+            # (PR2) will consume retrieval_plan / verification_plan to drive
+            # actual provider behavior. PR5 appends uncertainty-policy
+            # metadata while preserving the final route snapshot as the
+            # downstream source of truth.
+            self._current_turn_cognition_metadata = {
+                "mode": route.mode,
+                "retrieval_plan": route.retrieval_plan,
+                "verification_plan": route.verification_plan,
+                "allow_cheap_model": route.allow_cheap_model,
+                "consistency_check": route.consistency_check,
+                "routing_reasons": list(route.routing_reasons),
+                "dialogue_mode": route.dialogue_mode,
+                "answer_density": route.answer_density,
+                "stance_reasons": list(route.stance_reasons),
+            }
+            if uncertainty_decision is not None:
+                self._current_turn_cognition_metadata.update({
+                    "original_mode": original_mode,
+                    "uncertainty_confidence_band": uncertainty_decision.confidence_band,
+                    "uncertainty_action": uncertainty_decision.action,
+                    "uncertainty_reasons": list(uncertainty_decision.reasons),
+                    "depth_escalated": uncertainty_decision.escalate_depth,
+                    "target_mode": uncertainty_decision.target_mode,
+                    "require_tool_evidence": uncertainty_decision.require_tool_evidence,
+                    "seek_human": uncertainty_decision.seek_human,
+                })
+
+    def _default_consistency_verifier(self, prompt: str) -> str:
+        """Production verifier wrapper for the PR3 full consistency guard.
+
+        Calls the auxiliary text client (task ``"consistency_guard"`` with
+        auto-detect fallback) and returns the raw model output. The guard
+        layer parses the output as JSON; failures here are wrapped as
+        exceptions so the guard's non-fatal handling kicks in and the turn
+        falls back to the candidate response.
+        """
+        from agent.auxiliary_client import get_text_auxiliary_client
+
+        client, model = get_text_auxiliary_client(task="consistency_guard")
+        if client is None or not model:
+            raise RuntimeError("no auxiliary client available for consistency_guard")
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=2000,
+            timeout=30,
+        )
+        return (response.choices[0].message.content or "").strip()
+
     # ── Per-turn primary restoration ─────────────────────────────────────
 
     def _restore_primary_runtime(self) -> bool:
@@ -12288,6 +12461,15 @@ class AIAgent:
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
 
+        # ── Cognitive routing (PR1) ─────────────────────────────────────────
+        # Resolve route metadata before any prefetch / model selection so
+        # downstream layers can consume it. Disabled by default; when off,
+        # this stays a no-op and behavior matches pre-PR1 exactly.
+        self._resolve_current_cognitive_route(
+            original_user_message=original_user_message,
+            messages=messages,
+        )
+
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
         # how many tool iterations THIS turn used.
@@ -12516,11 +12698,52 @@ class AIAgent:
         # prefetch_all() on each tool call (10 tool calls = 10x latency + cost).
         # Use original_user_message (clean input) — user_message may contain
         # injected skill content that bloats / breaks provider queries.
+        #
+        # PR2: when the cognitive router has produced a route for this turn
+        # the prefetch goes through the layer-aware orchestration so the
+        # provider only consults the requested memory layers (principles /
+        # semantic / episodic). When no route exists (cognition disabled or
+        # router returned None) fall back to the legacy prefetch_all path so
+        # behavior is bit-for-bit identical to pre-PR2.
         _ext_prefetch_cache = ""
         if self._memory_manager:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
-                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                from agent.retrieval_policy import resolve_retrieval_policy
+
+                _policy = resolve_retrieval_policy(self._current_cognitive_route)
+                if _policy is not None:
+                    _ext_prefetch_cache = self._memory_manager.prefetch_ranked_for_policy(
+                        _query, layers=_policy.layers
+                    ) or ""
+                    try:
+                        _policy_meta = getattr(
+                            self._memory_manager, "last_policy_recall_metadata", None
+                        )
+                        if isinstance(_policy_meta, dict) and isinstance(
+                            self._current_turn_cognition_metadata, dict
+                        ):
+                            self._current_turn_cognition_metadata.update({
+                                "policy_memory_enabled": bool(_policy_meta.get("enabled")),
+                                "policy_memory_count": int(_policy_meta.get("count") or 0),
+                                "policy_memory_ids": list(_policy_meta.get("policy_ids") or []),
+                                "policy_memory_citations": list(_policy_meta.get("citations") or []),
+                                "policy_memory_categories": list(_policy_meta.get("categories") or []),
+                            })
+                    except Exception:
+                        pass
+                    try:
+                        _plasticity_meta = getattr(
+                            self._memory_manager, "last_plasticity_metadata", None
+                        )
+                        if isinstance(_plasticity_meta, dict) and isinstance(
+                            self._current_turn_cognition_metadata, dict
+                        ):
+                            self._current_turn_cognition_metadata.update(_plasticity_meta)
+                    except Exception:
+                        pass
+                else:
+                    _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:
                 pass
 
@@ -15788,6 +16011,165 @@ class AIAgent:
         # Determine if conversation completed successfully
         completed = final_response is not None and api_call_count < self.max_iterations
 
+        # ── Consistency guard / verification second pass (PR3) ───────────
+        # Post-generation guard. Runs only when the cognitive router asked
+        # for verification AND we have a non-empty candidate response. The
+        # guard never mutates the system prompt and is fully non-fatal: any
+        # exception falls through to the candidate response so a buggy
+        # verifier can never break a turn. When the guard rewrites the
+        # response we update both the returned ``final_response`` and the
+        # last assistant message in ``messages`` so persistence + hooks +
+        # caller all see the same revised text.
+        _verification_ladder_plan = None
+        if final_response and not interrupted and self._current_cognitive_route is not None:
+            try:
+                _verification_ladder_plan = resolve_verification_ladder(
+                    self._current_cognitive_route
+                )
+                if isinstance(self._current_turn_cognition_metadata, dict):
+                    self._current_turn_cognition_metadata.update(
+                        {
+                            "verification_ladder_enabled": _verification_ladder_plan.enabled,
+                            "verification_ladder_source_plan": _verification_ladder_plan.source_plan,
+                            "verification_ladder_stages": list(
+                                _verification_ladder_plan.stages
+                            ),
+                            "verification_ladder_applied_stages": [],
+                        }
+                    )
+            except Exception as exc:
+                # Non-fatal: ladder metadata must never change turn behavior.
+                logger.warning(
+                    "verification_ladder metadata raised (non-fatal): %s", exc
+                )
+
+        if final_response and not interrupted and should_run_consistency_guard(
+            self._current_cognitive_route
+        ):
+            try:
+                _plan = resolve_verification_plan(self._current_cognitive_route)
+                _user_msg_for_guard = (
+                    original_user_message if isinstance(original_user_message, str) else ""
+                )
+                if _plan == "light":
+                    _guard_result = run_light_consistency_check(
+                        candidate_response=final_response,
+                        user_message=_user_msg_for_guard,
+                    )
+                elif _plan == "full":
+                    _guard_result = run_full_consistency_check(
+                        candidate_response=final_response,
+                        user_message=_user_msg_for_guard,
+                        verifier=self._default_consistency_verifier,
+                    )
+                else:
+                    _guard_result = None
+
+                if _guard_result is not None:
+                    if _guard_result.changed and _guard_result.final_response:
+                        final_response = _guard_result.final_response
+                        # Mirror the revision into the last assistant message
+                        # so persistence, plugin hooks, and the returned
+                        # messages list all reflect what the user actually saw.
+                        for _m in reversed(messages):
+                            if _m.get("role") == "assistant" and not _m.get("tool_calls"):
+                                _m["content"] = _guard_result.final_response
+                                break
+                    if isinstance(self._current_turn_cognition_metadata, dict):
+                        self._current_turn_cognition_metadata["verification_applied"] = (
+                            _guard_result.applied
+                        )
+                        self._current_turn_cognition_metadata["verification_plan"] = (
+                            _guard_result.plan
+                        )
+                        self._current_turn_cognition_metadata["verification_changed"] = (
+                            _guard_result.changed
+                        )
+                        self._current_turn_cognition_metadata["verification_notes"] = list(
+                            _guard_result.notes
+                        )
+                        if _verification_ladder_plan is not None:
+                            self._current_turn_cognition_metadata[
+                                "verification_ladder_applied_stages"
+                            ] = (
+                                list(_verification_ladder_plan.stages)
+                                if _guard_result.applied
+                                else []
+                            )
+            except Exception as exc:
+                # Non-fatal: guard must never break the turn.
+                logger.warning(
+                    "consistency_guard wiring raised (non-fatal): %s", exc
+                )
+
+        # ── Process monitor / claimwise verification (PR16) ──────────────
+        # Observational only: it records evidence/policy gaps for the final
+        # post-guard response. It must never rewrite or block the response.
+        if final_response and not interrupted and self._current_cognitive_route is not None:
+            try:
+                _policy_refs = []
+                _verification_notes = []
+                if isinstance(self._current_turn_cognition_metadata, dict):
+                    _policy_refs = list(
+                        self._current_turn_cognition_metadata.get(
+                            "policy_memory_citations"
+                        )
+                        or []
+                    )
+                    _verification_notes = list(
+                        self._current_turn_cognition_metadata.get("verification_notes")
+                        or []
+                    )
+                _claims = extract_claims_from_response(final_response)
+                _process_report = assess_claims(
+                    _claims,
+                    policy_refs=_policy_refs,
+                    verification_notes=_verification_notes,
+                )
+                if isinstance(self._current_turn_cognition_metadata, dict):
+                    self._current_turn_cognition_metadata.update(
+                        build_process_monitor_metadata(_process_report)
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "process_monitor raised (non-fatal): %s", exc
+                )
+
+        # ── Autonomy / self-model telemetry (PR18) ───────────────────────
+        # Observation only: derive bounded autonomy metadata from the current
+        # turn signals after process/plasticity metadata has settled and before
+        # the nested trace snapshot is built. It must never mutate the response
+        # or grant additional execution authority.
+        if isinstance(self._current_turn_cognition_metadata, dict):
+            try:
+                _autonomy_telemetry = build_autonomy_telemetry_from_metadata(
+                    self._current_turn_cognition_metadata
+                )
+                self._current_turn_cognition_metadata.update(
+                    build_autonomy_metadata(_autonomy_telemetry)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "autonomy_telemetry raised (non-fatal): %s", exc
+                )
+
+        # ── Cognition turn trace snapshot (PR7) ──────────────────────────
+        # Build a stable nested trace after routing/uncertainty/verification
+        # metadata has settled. This is downstream telemetry plumbing only:
+        # failures must never change the final response or break the turn.
+        _cognition_trace = None
+        try:
+            _cognition_trace = build_cognition_turn_trace(
+                self._current_turn_cognition_metadata
+            )
+            if isinstance(self._current_turn_cognition_metadata, dict):
+                self._current_turn_cognition_metadata["cognition_trace"] = _cognition_trace
+        except Exception as exc:
+            logger.warning(
+                "cognition_trace builder raised (non-fatal): %s", exc
+            )
+            _cognition_trace = None
+
         # Save trajectory if enabled.  ``user_message`` may be a multimodal
         # list of parts; the trajectory format wants a plain string.
         self._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed)
@@ -15954,6 +16336,10 @@ class AIAgent:
             "estimated_cost_usd": self.session_estimated_cost_usd,
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
+            "cognition_metadata": dict(self._current_turn_cognition_metadata)
+            if isinstance(self._current_turn_cognition_metadata, dict)
+            else {},
+            "cognition_trace": _cognition_trace,
         }
         if self._tool_guardrail_halt_decision is not None:
             result["guardrail"] = self._tool_guardrail_halt_decision.to_metadata()
