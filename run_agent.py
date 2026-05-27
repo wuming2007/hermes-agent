@@ -4447,6 +4447,21 @@ class AIAgent:
                     )
                     return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
                 raise
+            except TypeError as exc:
+                # OpenAI SDK's streaming accumulator (lib/_parsing/_responses.py)
+                # does `for output in response.output:` without a None guard.
+                # On chatgpt.com/backend-api/codex the intermediate snapshot
+                # can have response.output == None (notably gpt-5.5 short
+                # answers that skip response.output_text.delta events),
+                # triggering TypeError('NoneType' object is not iterable).
+                # The raw create(stream=True) path doesn't use the
+                # accumulator, so it works.
+                logger.debug(
+                    "Codex Responses stream accumulator failed (SDK None-iter bug on "
+                    "short SSE); falling back to create(stream=True). %s error=%s",
+                    self._client_log_context(), exc,
+                )
+                return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
 
     def _run_codex_create_stream_fallback(self, api_kwargs: dict, client: Any = None):
         """Fallback path for stream completion edge cases on Codex-style Responses backends."""
@@ -4493,9 +4508,13 @@ class AIAgent:
                 if terminal_response is None and isinstance(event, dict):
                     terminal_response = event.get("response")
                 if terminal_response is not None:
-                    # Backfill empty output from collected stream events
+                    # Backfill empty output from collected stream events.
+                    # chatgpt.com/backend-api/codex sometimes returns
+                    # response.completed with response.output == None (rather
+                    # than []), so we must accept None too — not just empty
+                    # list.
                     _out = getattr(terminal_response, "output", None)
-                    if isinstance(_out, list) and not _out:
+                    if not isinstance(_out, list) or not _out:
                         if collected_output_items:
                             terminal_response.output = list(collected_output_items)
                             logger.debug(
