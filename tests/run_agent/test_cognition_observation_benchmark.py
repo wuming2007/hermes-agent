@@ -37,6 +37,12 @@ def _make_tool_defs(*names: str) -> list:
 
 @pytest.fixture()
 def agent():
+    # v0.16 tightened provider resolution: `api_key` alone no longer bypasses
+    # the centralized provider router (agent_init.py requires *both* api_key
+    # and base_url to take the explicit-creds fast path).  All other upstream
+    # test fixtures that construct AIAgent without live credentials supply a
+    # base_url — we do the same here.  The client is replaced with a MagicMock
+    # immediately after, so the URL value is irrelevant to what the tests assert.
     with (
         patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
         patch("run_agent.check_toolset_requirements", return_value={}),
@@ -44,6 +50,7 @@ def agent():
     ):
         a = AIAgent(
             api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
