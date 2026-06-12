@@ -1188,6 +1188,30 @@ DEFAULT_CONFIG = {
         },
     },
 
+    # Per-turn cognitive routing scaffold (PR1).
+    # Disabled by default; when enabled, classifies each turn into
+    # fast/standard/deep and surfaces routing metadata for downstream
+    # layers (verification ladder, layered retrieval, consistency guard).
+    "cognition": {
+        "enabled": False,
+        "fast_mode": {
+            "max_chars": 160,
+            "max_words": 28,
+            "allow_urls": False,
+            "allow_code_blocks": False,
+        },
+        "deep_mode_triggers": {
+            "historical_questions": True,
+            "code_changes": True,
+            "risky_external_actions": True,
+            "architecture_decisions": True,
+        },
+        "consistency_guard": {
+            "enabled": True,
+            "deep_mode_only": True,
+        },
+    },
+
     # Auxiliary model config — provider:model for each side task.
     # Format: provider is the provider name, model is the model slug.
     # "auto" for provider = auto-detect best available provider.
@@ -5195,6 +5219,25 @@ _FALLBACK_COMMENT = """
 # fallback_model:
 #   provider: openrouter
 #   model: anthropic/claude-sonnet-4
+#
+# ── Cognitive Routing ──────────────────────────────────────────────────
+# Per-turn fast/standard/deep classification scaffold. Disabled by
+# default; when enabled, classifies each turn and surfaces routing
+# metadata for downstream layers (verification, retrieval, etc).
+#
+# cognition:
+#   enabled: true
+#   fast_mode:
+#     max_chars: 160
+#     max_words: 28
+#   deep_mode_triggers:
+#     historical_questions: true
+#     code_changes: true
+#     risky_external_actions: true
+#     architecture_decisions: true
+#   consistency_guard:
+#     enabled: true
+#     deep_mode_only: true
 """
 
 

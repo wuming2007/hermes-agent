@@ -185,3 +185,157 @@ async def test_run_agent_passes_priority_processing_to_gateway_agent(monkeypatch
     assert result["final_response"] == "ok"
     assert _CapturingAgent.last_init["service_tier"] == "priority"
     assert _CapturingAgent.last_init["request_overrides"] == {"service_tier": "priority"}
+
+
+# ---------------------------------------------------------------------------
+# Cognitive routing gate (PR1) — gateway production wiring
+# ---------------------------------------------------------------------------
+
+
+_GATEWAY_COGNITION_CFG = {
+    "enabled": True,
+    "fast_mode": {"max_chars": 160, "max_words": 28},
+    "deep_mode_triggers": {
+        "historical_questions": True,
+        "code_changes": True,
+        "risky_external_actions": True,
+        "architecture_decisions": True,
+    },
+    "consistency_guard": {"enabled": True, "deep_mode_only": True},
+}
+
+
+def _make_runner_with_cheap_routing(cognition_cfg):
+    runner = _make_runner()
+    runner._smart_model_routing = {
+        "enabled": True,
+        "cheap_model": {"provider": "zai", "model": "glm-5-air"},
+        "max_simple_chars": 160,
+        "max_simple_words": 28,
+    }
+    runner._cognition_config = cognition_cfg
+    return runner
+
+
+_PRIMARY_RUNTIME = {
+    "api_key": "primary-key",
+    "base_url": "https://openrouter.ai/api/v1",
+    "provider": "openrouter",
+    "api_mode": "chat_completions",
+    "command": None,
+    "args": [],
+    "credential_pool": None,
+}
+
+
+def test_gateway_cognition_disabled_preserves_cheap_route(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_: {
+            "provider": "zai",
+            "api_mode": "chat_completions",
+            "base_url": "https://open.z.ai/api/v1",
+            "api_key": "cheap-key",
+            "source": "env/config",
+        },
+    )
+    runner = _make_runner_with_cheap_routing({"enabled": False})
+    result = runner._resolve_turn_agent_config(
+        "what time is it in tokyo?", "anthropic/claude-sonnet-4", _PRIMARY_RUNTIME
+    )
+    assert result["model"] == "glm-5-air"
+    assert result["runtime"]["provider"] == "zai"
+
+
+def test_gateway_cognition_fast_mode_allows_cheap_route(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_: {
+            "provider": "zai",
+            "api_mode": "chat_completions",
+            "base_url": "https://open.z.ai/api/v1",
+            "api_key": "cheap-key",
+            "source": "env/config",
+        },
+    )
+    runner = _make_runner_with_cheap_routing(_GATEWAY_COGNITION_CFG)
+    result = runner._resolve_turn_agent_config(
+        "what time is it in tokyo?", "anthropic/claude-sonnet-4", _PRIMARY_RUNTIME
+    )
+    assert result["model"] == "glm-5-air"
+
+
+def test_gateway_cognition_deep_trigger_blocks_cheap_route(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_: pytest.fail(
+            "runtime provider must NOT be invoked when cheap route is gated off"
+        ),
+    )
+    runner = _make_runner_with_cheap_routing(_GATEWAY_COGNITION_CFG)
+    # "publish" is a risky_external trigger but is NOT in
+    # smart_model_routing._COMPLEX_KEYWORDS, so the gate is the only thing
+    # keeping cheap routing off.
+    result = runner._resolve_turn_agent_config(
+        "should I publish this now?", "anthropic/claude-sonnet-4", _PRIMARY_RUNTIME
+    )
+    assert result["model"] == "anthropic/claude-sonnet-4"
+    assert result["runtime"]["provider"] == "openrouter"
+    assert result["label"] is None
+
+
+# ---------------------------------------------------------------------------
+# Cognition config loading parity (PR4)
+# ---------------------------------------------------------------------------
+
+
+def test_gateway_load_cognition_config_uses_shared_helper(tmp_path, monkeypatch):
+    """gateway/run.py's _load_cognition_config must delegate to the
+    shared loader so all entry points share normalization semantics."""
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "cognition:\n  enabled: true\n  fast_mode:\n    max_chars: 99\n",
+        encoding="utf-8",
+    )
+    result = gateway_run.GatewayRunner._load_cognition_config()
+    assert result["enabled"] is True
+    assert result["fast_mode"]["max_chars"] == 99
+
+
+def test_gateway_load_cognition_config_normalizes_malformed_yaml(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "cognition:\n  enabled: true\n  fast_mode: broken_string\n  deep_mode_triggers: 42\n",
+        encoding="utf-8",
+    )
+    result = gateway_run.GatewayRunner._load_cognition_config()
+    # Malformed sub-blocks must be coerced to {} via the shared helper.
+    assert result["enabled"] is True
+    assert result["fast_mode"] == {}
+    assert result["deep_mode_triggers"] == {}
+
+
+def test_gateway_malformed_cognition_config_does_not_crash_routing(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_: {
+            "provider": "zai",
+            "api_mode": "chat_completions",
+            "base_url": "https://open.z.ai/api/v1",
+            "api_key": "cheap-key",
+            "source": "env/config",
+        },
+    )
+    runner = _make_runner_with_cheap_routing(
+        {
+            "enabled": True,
+            "fast_mode": "broken",
+            "deep_mode_triggers": [1, 2, 3],
+            "consistency_guard": 42,
+        }
+    )
+    # Routing must complete without raising on the malformed sub-blocks.
+    result = runner._resolve_turn_agent_config(
+        "ping", "anthropic/claude-sonnet-4", _PRIMARY_RUNTIME
+    )
+    assert "model" in result
