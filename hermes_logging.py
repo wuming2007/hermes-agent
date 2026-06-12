@@ -342,7 +342,9 @@ def setup_logging(
     # Lazy import to avoid circular dependency at module load time.
     from agent.redact import RedactingFormatter
 
-    _install_macos_stderr_noise_filter()
+    # Skipped under pytest: guard matches the import-time call site above.
+    if "pytest" not in sys.modules:
+        _install_macos_stderr_noise_filter()
 
     root = logging.getLogger()
 
