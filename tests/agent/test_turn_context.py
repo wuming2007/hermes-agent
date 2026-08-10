@@ -72,6 +72,11 @@ class _FakeAgent:
         self._cached_system_prompt = "SYSTEM"
         self._memory_store = None
         self._memory_manager = None
+        # Cognitive routing (PR1/PR2) state the prologue reads/writes each
+        # turn. Cognition is disabled in this fake, mirroring upstream
+        # behavior when the feature is off.
+        self._current_cognitive_route = None
+        self._current_turn_cognition_metadata = {}
         self._memory_nudge_interval = 0
         self._turns_since_memory = 0
         self._user_turn_count = 0
@@ -134,6 +139,12 @@ class _FakeAgent:
 
     def _persist_session(self, *_a, **_k):
         self._persist_calls += 1
+
+    def _resolve_current_cognitive_route(self, *, original_user_message, messages):
+        # Cognition is disabled in this fake; mirror the real AIAgent's
+        # no-op-when-disabled behavior (route/metadata stay at their
+        # defaults set in __init__).
+        pass
 
 
 def _make_agent_with_cooldown(db_path, session_id, *, cooldown_until=None):

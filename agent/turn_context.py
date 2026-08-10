@@ -1144,6 +1144,15 @@ def build_turn_context(
         agent._interrupt_message = None
         agent._interrupt_thread_signal_pending = False
 
+    # ── Cognitive routing (PR1) ─────────────────────────────────────────
+    # Resolve route metadata before any prefetch / model selection so
+    # downstream layers can consume it. Disabled by default; when off,
+    # this stays a no-op and behavior matches upstream exactly.
+    agent._resolve_current_cognitive_route(
+        original_user_message=original_user_message,
+        messages=messages,
+    )
+
     # Notify memory providers of the new turn (BEFORE prefetch_all).
     if agent._memory_manager:
         try:
@@ -1156,12 +1165,53 @@ def build_turn_context(
     #
     # Skip prefetch on trivial prompts (greetings, acknowledgements) to
     # prevent memory-context injection on turns that carry no semantic signal.
+    #
+    # PR2: when the cognitive router has produced a route for this turn
+    # the prefetch goes through the layer-aware orchestration so the
+    # provider only consults the requested memory layers (principles /
+    # semantic / episodic). When no route exists (cognition disabled or
+    # router returned None) fall back to the legacy prefetch_all path so
+    # behavior is bit-for-bit identical to upstream.
     ext_prefetch_cache = ""
     if agent._memory_manager:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
             if not is_trivial_prompt(_query):
-                ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
+                from agent.retrieval_policy import resolve_retrieval_policy
+
+                _policy = resolve_retrieval_policy(agent._current_cognitive_route)
+                if _policy is not None:
+                    ext_prefetch_cache = agent._memory_manager.prefetch_ranked_for_policy(
+                        _query, layers=_policy.layers
+                    ) or ""
+                    try:
+                        _policy_meta = getattr(
+                            agent._memory_manager, "last_policy_recall_metadata", None
+                        )
+                        if isinstance(_policy_meta, dict) and isinstance(
+                            agent._current_turn_cognition_metadata, dict
+                        ):
+                            agent._current_turn_cognition_metadata.update({
+                                "policy_memory_enabled": bool(_policy_meta.get("enabled")),
+                                "policy_memory_count": int(_policy_meta.get("count") or 0),
+                                "policy_memory_ids": list(_policy_meta.get("policy_ids") or []),
+                                "policy_memory_citations": list(_policy_meta.get("citations") or []),
+                                "policy_memory_categories": list(_policy_meta.get("categories") or []),
+                            })
+                    except Exception:
+                        pass
+                    try:
+                        _plasticity_meta = getattr(
+                            agent._memory_manager, "last_plasticity_metadata", None
+                        )
+                        if isinstance(_plasticity_meta, dict) and isinstance(
+                            agent._current_turn_cognition_metadata, dict
+                        ):
+                            agent._current_turn_cognition_metadata.update(_plasticity_meta)
+                    except Exception:
+                        pass
+                else:
+                    ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
         except Exception:
             pass
 

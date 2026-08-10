@@ -68,6 +68,10 @@ class _FakeAgent:
         self._memory_write_origin = "assistant_tool"
         self._stream_context_scrubber = None
         self._stream_think_scrubber = None
+        # Cognitive routing (PR1) state the prologue reads/writes each turn;
+        # cognition is disabled in this fake.
+        self._current_cognitive_route = None
+        self._current_turn_cognition_metadata = {}
 
     def _ensure_db_session(self):
         pass
@@ -91,6 +95,10 @@ class _FakeAgent:
         pass
 
     def _persist_session(self, messages, _history=None):
+        pass
+
+    def _resolve_current_cognitive_route(self, *, original_user_message, messages):
+        # No-op: cognition disabled in this fake (mirrors real AIAgent).
         pass
 
 

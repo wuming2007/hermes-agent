@@ -305,6 +305,11 @@ def test_chat_multimodal_note_persists_clean_input_once(tmp_path, monkeypatch):
         agent._memory_nudge_interval = 0
         agent._turns_since_memory = 0
         agent._user_turn_count = 0
+        # Cognitive routing (PR1) state read/written by build_turn_context's
+        # per-turn hooks; cognition is disabled (empty config) in this fake.
+        agent._cognition_config = {}
+        agent._current_cognitive_route = None
+        agent._current_turn_cognition_metadata = {}
         agent._todo_store = types.SimpleNamespace(has_items=lambda: True)
         agent._tool_guardrails = types.SimpleNamespace(reset_for_turn=lambda: None)
         agent._compression_warning = None
