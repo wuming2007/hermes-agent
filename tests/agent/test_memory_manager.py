@@ -288,16 +288,32 @@ class TestManagerPrefetchRankedForPolicy:
         assert "survives" in result
 
     def test_ranker_failure_falls_back_to_existing_layered_prefetch(self, monkeypatch):
+        # Late-import the *current* module object rather than relying on the
+        # `MemoryManager` bound at collection time. Some sibling test modules
+        # (e.g. test_empty_tool_name_loop_dampening.py) purge `agent.*` from
+        # sys.modules and re-import mid-run; if collection-time bindings are
+        # used, the class instantiated here and the module patched below can
+        # end up being two different module objects, so the patch silently
+        # misses. Importing here guarantees both refer to the same object.
+        import importlib
+
+        mm = importlib.import_module("agent.memory_manager")
+
+        # Also build the candidate via mm's own MemoryCandidate binding: the
+        # manager does `isinstance(candidate, MemoryCandidate)` against its
+        # module-local import, which silently fails (and short-circuits the
+        # candidate path entirely) if the candidate were built from the
+        # collection-time top-of-file import after a sys.modules reload.
         provider = _CandidateProvider(
-            candidates=[MemoryCandidate(text="candidate", provider="p", relevance=1.0)]
+            candidates=[mm.MemoryCandidate(text="candidate", provider="p", relevance=1.0)]
         )
-        mgr = MemoryManager()
+        mgr = mm.MemoryManager()
         mgr.add_provider(provider)
 
         def _boom(*args, **kwargs):
             raise RuntimeError("ranker exploded")
 
-        monkeypatch.setattr("agent.memory_manager.rank_memory_candidates", _boom)
+        monkeypatch.setattr(mm, "rank_memory_candidates", _boom)
 
         result = mgr.prefetch_ranked_for_policy("q", layers=("semantic",), session_id="s")
 
@@ -555,9 +571,20 @@ class TestMemoryPlasticityManager:
         assert mgr.last_plasticity_metadata["plasticity_actions"] == ["supersede"]
 
     def test_plasticity_failure_is_non_fatal(self, monkeypatch):
+        # See comment in test_ranker_failure_falls_back_to_existing_layered_prefetch:
+        # late-import the current module object so the instantiated class and
+        # the monkeypatched attribute are guaranteed to be on the same module,
+        # even if another test module reloaded agent.memory_manager mid-run.
+        import importlib
+
+        mm = importlib.import_module("agent.memory_manager")
+
+        # Also build the candidate via mm's own MemoryCandidate binding: see
+        # the comment in test_ranker_failure_falls_back_to_existing_layered_prefetch
+        # for why the collection-time top-of-file import isn't safe to use here.
         provider = _CandidateProvider(
             candidates=[
-                MemoryCandidate(
+                mm.MemoryCandidate(
                     text="survives plasticity failure",
                     provider="p",
                     relevance=1.0,
@@ -565,13 +592,13 @@ class TestMemoryPlasticityManager:
                 )
             ]
         )
-        mgr = MemoryManager()
+        mgr = mm.MemoryManager()
         mgr.add_provider(provider)
 
         def _boom(*args, **kwargs):
             raise RuntimeError("plasticity exploded")
 
-        monkeypatch.setattr("agent.memory_manager.apply_plasticity_to_candidate", _boom)
+        monkeypatch.setattr(mm, "apply_plasticity_to_candidate", _boom)
 
         result = mgr.prefetch_ranked_for_policy("q", layers=("semantic",), session_id="s")
 
