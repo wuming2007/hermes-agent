@@ -3467,6 +3467,25 @@ _FALLBACK_COMMENT = """
 # fallback_model:
 #   provider: openrouter
 #   model: anthropic/claude-sonnet-4
+#
+# ── Cognitive Routing ──────────────────────────────────────────────────
+# Per-turn fast/standard/deep classification scaffold. Disabled by
+# default; when enabled, classifies each turn and surfaces routing
+# metadata for downstream layers (verification, retrieval, etc).
+#
+# cognition:
+#   enabled: true
+#   fast_mode:
+#     max_chars: 160
+#     max_words: 28
+#   deep_mode_triggers:
+#     historical_questions: true
+#     code_changes: true
+#     risky_external_actions: true
+#     architecture_decisions: true
+#   consistency_guard:
+#     enabled: true
+#     deep_mode_only: true
 """
 
 
