@@ -26,6 +26,23 @@ import os
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.message_content import flatten_message_text
+from agent.autonomy_telemetry import (
+    build_autonomy_metadata,
+    build_autonomy_telemetry_from_metadata,
+)
+from agent.cognition_trace import build_cognition_turn_trace
+from agent.consistency_guard import (
+    resolve_verification_ladder,
+    resolve_verification_plan,
+    run_full_consistency_check,
+    run_light_consistency_check,
+    should_run_consistency_guard,
+)
+from agent.process_monitor import (
+    assess_claims,
+    build_process_monitor_metadata,
+    extract_claims_from_response,
+)
 
 
 def _is_pure_tool_call_tail(msg: dict) -> bool:
@@ -230,6 +247,165 @@ def finalize_turn(
         )
         if callable(_rollback_fn):
             _rollback_fn(_preflight_snapshot)
+
+    # ── Consistency guard / verification second pass (PR3) ───────────
+    # Post-generation guard. Runs only when the cognitive router asked
+    # for verification AND we have a non-empty candidate response. The
+    # guard never mutates the system prompt and is fully non-fatal: any
+    # exception falls through to the candidate response so a buggy
+    # verifier can never break a turn. When the guard rewrites the
+    # response we update both the returned ``final_response`` and the
+    # last assistant message in ``messages`` so persistence + hooks +
+    # caller all see the same revised text.
+    _verification_ladder_plan = None
+    if final_response and not interrupted and agent._current_cognitive_route is not None:
+        try:
+            _verification_ladder_plan = resolve_verification_ladder(
+                agent._current_cognitive_route
+            )
+            if isinstance(agent._current_turn_cognition_metadata, dict):
+                agent._current_turn_cognition_metadata.update(
+                    {
+                        "verification_ladder_enabled": _verification_ladder_plan.enabled,
+                        "verification_ladder_source_plan": _verification_ladder_plan.source_plan,
+                        "verification_ladder_stages": list(
+                            _verification_ladder_plan.stages
+                        ),
+                        "verification_ladder_applied_stages": [],
+                    }
+                )
+        except Exception as exc:
+            # Non-fatal: ladder metadata must never change turn behavior.
+            logger.warning(
+                "verification_ladder metadata raised (non-fatal): %s", exc
+            )
+
+    if final_response and not interrupted and should_run_consistency_guard(
+        agent._current_cognitive_route
+    ):
+        try:
+            _plan = resolve_verification_plan(agent._current_cognitive_route)
+            _user_msg_for_guard = (
+                original_user_message if isinstance(original_user_message, str) else ""
+            )
+            if _plan == "light":
+                _guard_result = run_light_consistency_check(
+                    candidate_response=final_response,
+                    user_message=_user_msg_for_guard,
+                )
+            elif _plan == "full":
+                _guard_result = run_full_consistency_check(
+                    candidate_response=final_response,
+                    user_message=_user_msg_for_guard,
+                    verifier=agent._default_consistency_verifier,
+                )
+            else:
+                _guard_result = None
+
+            if _guard_result is not None:
+                if _guard_result.changed and _guard_result.final_response:
+                    final_response = _guard_result.final_response
+                    # Mirror the revision into the last assistant message
+                    # so persistence, plugin hooks, and the returned
+                    # messages list all reflect what the user actually saw.
+                    for _m in reversed(messages):
+                        if _m.get("role") == "assistant" and not _m.get("tool_calls"):
+                            _m["content"] = _guard_result.final_response
+                            break
+                if isinstance(agent._current_turn_cognition_metadata, dict):
+                    agent._current_turn_cognition_metadata["verification_applied"] = (
+                        _guard_result.applied
+                    )
+                    agent._current_turn_cognition_metadata["verification_plan"] = (
+                        _guard_result.plan
+                    )
+                    agent._current_turn_cognition_metadata["verification_changed"] = (
+                        _guard_result.changed
+                    )
+                    agent._current_turn_cognition_metadata["verification_notes"] = list(
+                        _guard_result.notes
+                    )
+                    if _verification_ladder_plan is not None:
+                        agent._current_turn_cognition_metadata[
+                            "verification_ladder_applied_stages"
+                        ] = (
+                            list(_verification_ladder_plan.stages)
+                            if _guard_result.applied
+                            else []
+                        )
+        except Exception as exc:
+            # Non-fatal: guard must never break the turn.
+            logger.warning(
+                "consistency_guard wiring raised (non-fatal): %s", exc
+            )
+
+    # ── Process monitor / claimwise verification (PR16) ──────────────
+    # Observational only: it records evidence/policy gaps for the final
+    # post-guard response. It must never rewrite or block the response.
+    if final_response and not interrupted and agent._current_cognitive_route is not None:
+        try:
+            _policy_refs = []
+            _verification_notes = []
+            if isinstance(agent._current_turn_cognition_metadata, dict):
+                _policy_refs = list(
+                    agent._current_turn_cognition_metadata.get(
+                        "policy_memory_citations"
+                    )
+                    or []
+                )
+                _verification_notes = list(
+                    agent._current_turn_cognition_metadata.get("verification_notes")
+                    or []
+                )
+            _claims = extract_claims_from_response(final_response)
+            _process_report = assess_claims(
+                _claims,
+                policy_refs=_policy_refs,
+                verification_notes=_verification_notes,
+            )
+            if isinstance(agent._current_turn_cognition_metadata, dict):
+                agent._current_turn_cognition_metadata.update(
+                    build_process_monitor_metadata(_process_report)
+                )
+        except Exception as exc:
+            logger.warning(
+                "process_monitor raised (non-fatal): %s", exc
+            )
+
+    # ── Autonomy / self-model telemetry (PR18) ───────────────────────
+    # Observation only: derive bounded autonomy metadata from the current
+    # turn signals after process/plasticity metadata has settled and before
+    # the nested trace snapshot is built. It must never mutate the response
+    # or grant additional execution authority.
+    if isinstance(agent._current_turn_cognition_metadata, dict):
+        try:
+            _autonomy_telemetry = build_autonomy_telemetry_from_metadata(
+                agent._current_turn_cognition_metadata
+            )
+            agent._current_turn_cognition_metadata.update(
+                build_autonomy_metadata(_autonomy_telemetry)
+            )
+        except Exception as exc:
+            logger.warning(
+                "autonomy_telemetry raised (non-fatal): %s", exc
+            )
+
+    # ── Cognition turn trace snapshot (PR7) ──────────────────────────
+    # Build a stable nested trace after routing/uncertainty/verification
+    # metadata has settled. This is downstream telemetry plumbing only:
+    # failures must never change the final response or break the turn.
+    _cognition_trace = None
+    try:
+        _cognition_trace = build_cognition_turn_trace(
+            agent._current_turn_cognition_metadata
+        )
+        if isinstance(agent._current_turn_cognition_metadata, dict):
+            agent._current_turn_cognition_metadata["cognition_trace"] = _cognition_trace
+    except Exception as exc:
+        logger.warning(
+            "cognition_trace builder raised (non-fatal): %s", exc
+        )
+        _cognition_trace = None
 
     # Post-loop cleanup must never lose the response.  Trajectory save,
     # resource teardown, and session persistence all touch fallible
@@ -656,6 +832,10 @@ def finalize_turn(
         "estimated_cost_usd": agent.session_estimated_cost_usd,
         "cost_status": agent.session_cost_status,
         "cost_source": agent.session_cost_source,
+        "cognition_metadata": dict(agent._current_turn_cognition_metadata)
+        if isinstance(agent._current_turn_cognition_metadata, dict)
+        else {},
+        "cognition_trace": _cognition_trace,
         # Requested service tier (from request_overrides.extra_body), for
         # billing audits by callers like `hermes -z --usage-file`.
         "service_tier": (

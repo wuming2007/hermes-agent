@@ -61,6 +61,8 @@ class _StubAgent:
             setattr(self, attr, 0)
         self.session_cost_status = "ok"
         self.session_cost_source = "stub"
+        self._current_cognitive_route = None
+        self._current_turn_cognition_metadata = {}
         self.persisted_messages = None
 
     # --- fallible cleanup surfaces (all succeed here) ------------------

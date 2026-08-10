@@ -37,6 +37,8 @@ class _LimitAgent:
         self.session_estimated_cost_usd = 0
         self.session_cost_status = "unknown"
         self.session_cost_source = "test"
+        self._current_cognitive_route = None
+        self._current_turn_cognition_metadata = {}
         self._tool_guardrail_halt_decision = None
         self._interrupt_message = None
         self._response_was_previewed = False
