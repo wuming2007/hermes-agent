@@ -5924,3 +5924,911 @@ class TestMemoryContextSanitization:
         assert "stale observation" not in result
         assert "how is the honcho working" in result
 
+
+class TestMemoryProviderTurnStart:
+    """run_conversation() must call memory_manager.on_turn_start() before prefetch_all().
+
+    Without this call, providers like Honcho never update _turn_count, so cadence
+    checks (contextCadence, dialecticCadence) are always satisfied — every turn
+    fires both context refresh and dialectic, ignoring the configured cadence.
+    """
+
+    def test_on_turn_start_called_before_prefetch(self):
+        """Source-level check: on_turn_start appears before prefetch in build_turn_context."""
+        import inspect
+        from agent.turn_context import build_turn_context as _btc
+        src = inspect.getsource(_btc)
+        # Find the actual method calls, not comments. Use the layer-aware
+        # prefetch call since it is the earliest prefetch site in the
+        # source (the legacy prefetch_all() is the fallback that runs
+        # later); on_turn_start must precede prefetch either way.
+        idx_turn_start = src.index(".on_turn_start(")
+        idx_prefetch = src.index(".prefetch_ranked_for_policy(")
+        assert idx_turn_start < idx_prefetch, (
+            "on_turn_start() must be called before prefetch in build_turn_context "
+            "so that memory providers have the correct turn count for cadence checks"
+        )
+
+    def test_on_turn_start_uses_user_turn_count(self):
+        """Source-level check: on_turn_start receives the user_turn_count."""
+        import inspect
+        from agent.turn_context import build_turn_context as _btc
+        src = inspect.getsource(_btc)
+        # The extracted body uses ``agent.X`` rather than ``self.X``;
+        # assert the extracted-form spelling directly.
+        assert "on_turn_start(agent._user_turn_count" in src
+
+# ===================================================================
+# Cognitive routing (PR1)
+# ===================================================================
+
+
+_FAST_COGNITION_CFG = {
+    "enabled": True,
+    "fast_mode": {
+        "max_chars": 160,
+        "max_words": 28,
+        "allow_urls": False,
+        "allow_code_blocks": False,
+    },
+    "deep_mode_triggers": {
+        "historical_questions": True,
+        "code_changes": True,
+        "risky_external_actions": True,
+        "architecture_decisions": True,
+    },
+    "consistency_guard": {"enabled": True, "deep_mode_only": True},
+}
+
+
+def _run_one_turn(agent, message: str):
+    """Drive run_conversation through a single stop response."""
+    resp = _mock_response(content="ok", finish_reason="stop")
+    agent.client.chat.completions.create.return_value = resp
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        return agent.run_conversation(message)
+
+
+class TestCognitionTraceTrajectoryExport:
+    """PR8: export cognition_trace into trajectory JSONL metadata."""
+
+    def test_save_trajectory_passes_cognition_trace_metadata(self, agent):
+        agent.save_trajectories = True
+        trace = {
+            "schema_version": 1,
+            "enabled": True,
+            "route": {"mode": "standard"},
+            "uncertainty": {"present": False},
+            "verification": {"ladder_enabled": True},
+        }
+        agent._current_turn_cognition_metadata = {"cognition_trace": trace}
+        trajectory = [{"from": "human", "value": "hello"}]
+
+        with (
+            patch.object(
+                agent,
+                "_convert_to_trajectory_format",
+                return_value=trajectory,
+            ) as convert,
+            patch("run_agent._save_trajectory_to_file") as save,
+        ):
+            agent._save_trajectory(
+                [{"role": "user", "content": "hello"}],
+                "hello",
+                True,
+            )
+
+        convert.assert_called_once()
+        save.assert_called_once_with(
+            trajectory,
+            agent.model,
+            True,
+            metadata={"cognition_trace": trace},
+        )
+
+    def test_save_trajectory_omits_metadata_without_cognition_trace(self, agent):
+        agent.save_trajectories = True
+        agent._current_turn_cognition_metadata = {"mode": "disabled"}
+        trajectory = [{"from": "human", "value": "hello"}]
+
+        with (
+            patch.object(
+                agent,
+                "_convert_to_trajectory_format",
+                return_value=trajectory,
+            ),
+            patch("run_agent._save_trajectory_to_file") as save,
+        ):
+            agent._save_trajectory(
+                [{"role": "user", "content": "hello"}],
+                "hello",
+                True,
+            )
+
+        save.assert_called_once_with(
+            trajectory,
+            agent.model,
+            True,
+            metadata=None,
+        )
+
+
+class TestCognitiveRouting:
+    """Wire-through tests for the PR1 cognitive routing scaffold."""
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+    def test_disabled_cognition_leaves_route_none(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = {"enabled": False}
+        result = _run_one_turn(agent, "hello")
+        assert agent._current_cognitive_route is None
+        # Metadata should record disabled state without disturbing other code.
+        assert agent._current_turn_cognition_metadata.get("mode") in (None, "disabled")
+        assert result["cognition_trace"]["enabled"] is False
+        assert result["cognition_trace"]["route"]["mode"] == "disabled"
+
+    def test_enabled_simple_prompt_routes_fast(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "what time is it in tokyo?")
+        route = agent._current_cognitive_route
+        assert route is not None
+        assert route.mode == "fast"
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "fast"
+        assert meta["allow_cheap_model"] is True
+        assert meta["consistency_check"] is False
+
+    def test_status_project_prompt_routes_standard_and_blocks_cheap_model(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "目前 cognition stack 狀態如何？")
+        route = agent._current_cognitive_route
+        assert route is not None
+        assert route.mode == "standard"
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "standard"
+        assert meta["retrieval_plan"] == "principles_plus_semantic"
+        assert meta["verification_plan"] == "light"
+        assert meta["allow_cheap_model"] is False
+        assert meta["dialogue_mode"] == "status"
+        assert meta["answer_density"] == "brief"
+        assert any("status_lookup" in reason or "project_state" in reason for reason in meta["routing_reasons"])
+        trace = meta["cognition_trace"]
+        assert trace["route"]["mode"] == "standard"
+        assert trace["interaction"]["dialogue_mode"] == "status"
+
+    def test_enabled_historical_prompt_routes_deep(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "上次我們討論的 root cause 是什麼？")
+        route = agent._current_cognitive_route
+        assert route is not None
+        assert route.mode == "deep"
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "deep"
+        assert meta["allow_cheap_model"] is False
+        assert meta["consistency_check"] is True
+
+    def test_route_metadata_includes_retrieval_plan(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "ping")
+        meta = agent._current_turn_cognition_metadata
+        assert meta["retrieval_plan"] == "principles_only"
+        assert meta["verification_plan"] == "none"
+
+    def test_route_metadata_for_standard_prompt(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        long_prompt = (
+            "Could you please help me draft a thoughtful and friendly multi-paragraph "
+            "note about our upcoming team picnic that covers food preferences, "
+            "accessibility needs, transportation options, weather contingencies, "
+            "and a few possible time slots so everyone can weigh in early?"
+        )
+        _run_one_turn(agent, long_prompt)
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "standard"
+        assert meta["retrieval_plan"] == "principles_plus_semantic"
+        assert meta["verification_plan"] == "light"
+
+    def test_route_metadata_for_deep_prompt(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "please refactor this module")
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "deep"
+        assert meta["retrieval_plan"] == "principles_plus_semantic_plus_episodic"
+        assert meta["verification_plan"] == "full"
+
+    def test_uncertainty_policy_metadata_is_attached_when_enabled(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "ping")
+        meta = agent._current_turn_cognition_metadata
+        assert meta["uncertainty_confidence_band"] == "high"
+        assert meta["uncertainty_action"] == "answer"
+        assert meta["depth_escalated"] is False
+        assert meta["require_tool_evidence"] is False
+        assert meta["seek_human"] is False
+
+    def test_uncertainty_policy_escalates_fast_route_to_standard(self, agent):
+        self._setup_agent(agent)
+        cfg = {
+            **_FAST_COGNITION_CFG,
+            "deep_mode_triggers": {
+                **_FAST_COGNITION_CFG["deep_mode_triggers"],
+                "historical_questions": False,
+            },
+        }
+        agent._cognition_config = cfg
+        _run_one_turn(agent, "上次我們說了什麼？")
+        route = agent._current_cognitive_route
+        assert route is not None
+        assert route.mode == "standard"
+        meta = agent._current_turn_cognition_metadata
+        assert meta["original_mode"] == "fast"
+        assert meta["mode"] == "standard"
+        assert meta["uncertainty_action"] == "escalate_depth"
+        assert meta["depth_escalated"] is True
+        assert meta["target_mode"] == "standard"
+        assert "uncertainty_escalated:standard" in meta["routing_reasons"]
+        trace = meta["cognition_trace"]
+        assert trace["route"]["mode"] == "standard"
+        assert trace["route"]["original_mode"] == "fast"
+        assert trace["uncertainty"]["present"] is True
+        assert trace["uncertainty"]["action"] == "escalate_depth"
+        assert trace["uncertainty"]["depth_escalated"] is True
+
+    def test_uncertainty_policy_marks_risky_external_action_as_seek_human(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        _run_one_turn(agent, "please send the email now")
+        meta = agent._current_turn_cognition_metadata
+        assert meta["uncertainty_confidence_band"] == "low"
+        assert meta["uncertainty_action"] == "seek_human"
+        assert meta["require_tool_evidence"] is True
+        assert meta["seek_human"] is True
+
+    def test_uncertainty_policy_can_be_disabled_without_metadata(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = {
+            **_FAST_COGNITION_CFG,
+            "uncertainty_policy": {"enabled": False},
+        }
+        _run_one_turn(agent, "ping")
+        meta = agent._current_turn_cognition_metadata
+        assert meta["mode"] == "fast"
+        assert "uncertainty_action" not in meta
+
+    def test_disabled_cognition_does_not_invalidate_system_prompt_cache(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = {"enabled": False}
+        cached_before = agent._cached_system_prompt
+        _run_one_turn(agent, "hello")
+        # PR1 must not change the system prompt as a side effect of routing.
+        assert agent._cached_system_prompt == cached_before
+
+    def test_enabled_cognition_does_not_invalidate_system_prompt_cache(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        cached_before = agent._cached_system_prompt
+        _run_one_turn(agent, "please refactor this module")
+        assert agent._cached_system_prompt == cached_before
+
+
+class TestCognitionTurnMetadataSnapshot:
+    """The metadata snapshot must expose the full PR1 contract so downstream
+    layers (PR2 layered retrieval, PR3 consistency guard) can read it without
+    reaching into the router internals."""
+
+    _REQUIRED_KEYS = {
+        "mode",
+        "retrieval_plan",
+        "verification_plan",
+        "allow_cheap_model",
+        "consistency_check",
+        "routing_reasons",
+        "dialogue_mode",
+        "answer_density",
+        "stance_reasons",
+    }
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        agent._cognition_config = _FAST_COGNITION_CFG
+
+    def _drive(self, agent, message):
+        _run_one_turn(agent, message)
+        return agent._current_turn_cognition_metadata
+
+    def test_fast_metadata_snapshot(self, agent):
+        self._setup_agent(agent)
+        meta = self._drive(agent, "ping")
+        assert self._REQUIRED_KEYS.issubset(meta.keys())
+        assert meta["mode"] == "fast"
+        assert meta["retrieval_plan"] == "principles_only"
+        assert meta["verification_plan"] == "none"
+        assert meta["allow_cheap_model"] is True
+        assert meta["consistency_check"] is False
+        assert isinstance(meta["routing_reasons"], list)
+        assert meta["dialogue_mode"] == "query"
+        assert meta["answer_density"] == "brief"
+        assert isinstance(meta["stance_reasons"], list)
+
+    def test_standard_metadata_snapshot(self, agent):
+        self._setup_agent(agent)
+        long_prompt = (
+            "Could you please help me draft a thoughtful and friendly multi-paragraph "
+            "note about our upcoming team picnic that covers food preferences, "
+            "accessibility needs, transportation options, weather contingencies, "
+            "and a few possible time slots so everyone can weigh in early?"
+        )
+        meta = self._drive(agent, long_prompt)
+        assert self._REQUIRED_KEYS.issubset(meta.keys())
+        assert meta["mode"] == "standard"
+        assert meta["retrieval_plan"] == "principles_plus_semantic"
+        assert meta["verification_plan"] == "light"
+        assert meta["allow_cheap_model"] is False
+        assert meta["dialogue_mode"] == "query"
+        assert meta["answer_density"] == "standard"
+
+    def test_deep_metadata_snapshot(self, agent):
+        self._setup_agent(agent)
+        meta = self._drive(agent, "上次的設計回顧")
+        assert self._REQUIRED_KEYS.issubset(meta.keys())
+        assert meta["mode"] == "deep"
+        assert meta["retrieval_plan"] == "principles_plus_semantic_plus_episodic"
+        assert meta["verification_plan"] == "full"
+        assert meta["allow_cheap_model"] is False
+        assert meta["consistency_check"] is True
+        assert meta["dialogue_mode"] == "query"
+        assert meta["answer_density"] == "standard"
+        # routing_reasons should explain *why* deep was chosen.
+        assert any(":" in r for r in meta["routing_reasons"])
+
+    def test_status_prompt_metadata_snapshot(self, agent):
+        self._setup_agent(agent)
+        meta = self._drive(agent, "目前 cognition stack 狀態如何？")
+        assert self._REQUIRED_KEYS.issubset(meta.keys())
+        assert meta["dialogue_mode"] == "status"
+        assert meta["answer_density"] == "brief"
+        assert any(reason.startswith("status:") for reason in meta["stance_reasons"])
+        assert meta["cognition_trace"]["interaction"]["dialogue_mode"] == "status"
+        assert meta["cognition_trace"]["interaction"]["answer_density"] == "brief"
+
+
+# ===================================================================
+# Layered retrieval wire-through (PR2)
+# ===================================================================
+
+
+def _install_memory_manager_spy(agent):
+    """Replace agent._memory_manager with a spy that records both prefetch
+    paths so tests can assert which one the run loop chose."""
+    spy = MagicMock()
+    spy.prefetch_all = MagicMock(return_value="")
+    spy.prefetch_for_policy = MagicMock(return_value="")
+    spy.prefetch_ranked_for_policy = MagicMock(return_value="")
+    spy.last_policy_recall_metadata = {
+        "enabled": True,
+        "count": 1,
+        "policy_ids": ["send-guard"],
+        "citations": ["policy:send-guard@1"],
+        "categories": ["external_action"],
+    }
+    # Other manager methods called during the turn must be no-ops.
+    spy.queue_prefetch_all = MagicMock()
+    spy.sync_all = MagicMock()
+    spy.on_turn_start = MagicMock()
+    spy.handle_tool_call = MagicMock(return_value="")
+    spy.has_tool = MagicMock(return_value=False)
+    spy.get_all_tool_names = MagicMock(return_value=set())
+    agent._memory_manager = spy
+    return spy
+
+
+class TestLayeredRetrievalPrefetch:
+    """PR2 wires the cognition route into the run loop's prefetch site:
+    when a route exists the manager's layered orchestration is called with
+    the policy's layers; otherwise the legacy prefetch_all path is used so
+    cognition-disabled behavior is bit-for-bit identical to pre-PR2."""
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+    def test_disabled_cognition_uses_legacy_prefetch_all(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = {"enabled": False}
+        spy = _install_memory_manager_spy(agent)
+
+        # "hello" is classified as a trivial prompt (agent/memory_provider.py
+        # is_trivial_prompt) and now skips prefetch entirely regardless of
+        # cognition state, so a substantive message is required to exercise
+        # the legacy prefetch_all path this test targets.
+        _run_one_turn(agent, "search something")
+
+        spy.prefetch_all.assert_called_once()
+        spy.prefetch_for_policy.assert_not_called()
+        spy.prefetch_ranked_for_policy.assert_not_called()
+        # Query passed verbatim from the user message.
+        assert spy.prefetch_all.call_args.args[0] == "search something"
+
+    def test_fast_route_invokes_principles_only_layered_prefetch(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        spy = _install_memory_manager_spy(agent)
+
+        _run_one_turn(agent, "ping")
+
+        spy.prefetch_ranked_for_policy.assert_called_once()
+        spy.prefetch_for_policy.assert_not_called()
+        spy.prefetch_all.assert_not_called()
+        kwargs = spy.prefetch_ranked_for_policy.call_args.kwargs
+        assert kwargs["layers"] == ("principles",)
+
+    def test_standard_route_invokes_principles_plus_semantic_layered_prefetch(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        spy = _install_memory_manager_spy(agent)
+
+        long_prompt = (
+            "Could you please help me draft a thoughtful and friendly multi-paragraph "
+            "note about our upcoming team picnic that covers food preferences, "
+            "accessibility needs, transportation options, weather contingencies, "
+            "and a few possible time slots so everyone can weigh in early?"
+        )
+        _run_one_turn(agent, long_prompt)
+
+        spy.prefetch_ranked_for_policy.assert_called_once()
+        spy.prefetch_for_policy.assert_not_called()
+        spy.prefetch_all.assert_not_called()
+        assert spy.prefetch_ranked_for_policy.call_args.kwargs["layers"] == (
+            "principles", "semantic",
+        )
+
+    def test_deep_route_invokes_full_layered_prefetch(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        spy = _install_memory_manager_spy(agent)
+
+        _run_one_turn(agent, "上次的設計回顧")
+
+        spy.prefetch_ranked_for_policy.assert_called_once()
+        spy.prefetch_for_policy.assert_not_called()
+        spy.prefetch_all.assert_not_called()
+        assert spy.prefetch_ranked_for_policy.call_args.kwargs["layers"] == (
+            "principles", "semantic", "episodic",
+        )
+
+    def test_layered_prefetch_failure_is_non_fatal(self, agent):
+        """A raising prefetch_ranked_for_policy must not break the turn — same
+        contract the legacy prefetch_all path already had."""
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        spy = _install_memory_manager_spy(agent)
+        spy.prefetch_ranked_for_policy.side_effect = RuntimeError("boom")
+
+        result = _run_one_turn(agent, "ping")
+        assert result["completed"] is True
+
+    def test_disabled_cognition_does_not_invoke_layered_path(self, agent):
+        """Belt-and-suspenders: even with the cognition_config attribute
+        missing entirely, only legacy prefetch_all is used."""
+        self._setup_agent(agent)
+        if hasattr(agent, "_cognition_config"):
+            agent._cognition_config = {}
+        spy = _install_memory_manager_spy(agent)
+
+        # "hi" is classified as a trivial prompt (agent/memory_provider.py
+        # is_trivial_prompt) and now skips prefetch entirely; use a
+        # substantive message so the legacy prefetch_all path actually runs.
+        _run_one_turn(agent, "search something")
+
+        spy.prefetch_all.assert_called_once()
+        spy.prefetch_for_policy.assert_not_called()
+        spy.prefetch_ranked_for_policy.assert_not_called()
+
+    def test_policy_recall_metadata_is_copied_into_cognition_metadata(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        spy = _install_memory_manager_spy(agent)
+
+        result = _run_one_turn(agent, "please send email")
+
+        spy.prefetch_ranked_for_policy.assert_called_once()
+        assert result["cognition_metadata"]["policy_memory_enabled"] is True
+        assert result["cognition_metadata"]["policy_memory_count"] == 1
+        assert result["cognition_metadata"]["policy_memory_ids"] == ["send-guard"]
+        assert result["cognition_metadata"]["policy_memory_citations"] == ["policy:send-guard@1"]
+        assert result["cognition_metadata"]["policy_memory_categories"] == ["external_action"]
+        assert result["cognition_trace"]["policy"]["policy_ids"] == ["send-guard"]
+
+
+# ===================================================================
+
+
+
+def _drive_simple_turn(agent, message: str, *, content: str = "candidate"):
+    """Like _run_one_turn but lets the test control the assistant content
+    so guard wiring can be observed cleanly."""
+    resp = _mock_response(content=content, finish_reason="stop")
+    agent.client.chat.completions.create.return_value = resp
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        return agent.run_conversation(message)
+
+
+class TestProcessMonitorWiring:
+    """PR16: process monitor runs after guard and only records metadata/trace."""
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+    def test_process_monitor_metadata_and_trace_are_attached(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+
+        result = _drive_simple_turn(agent, "status?", content="The branch is clean.")
+
+        assert result["final_response"] == "The branch is clean."
+        meta = result["cognition_metadata"]
+        assert meta["process_monitor_enabled"] is True
+        assert meta["process_monitor_claim_count"] == 1
+        assert meta["process_monitor_evidence_gap_count"] == 1
+        assert meta["process_monitor_unsupported_claims"] == ["The branch is clean."]
+        assert result["cognition_trace"]["process_monitor"]["claim_count"] == 1
+        assert result["cognition_trace"]["process_monitor"]["unsupported_claims"] == [
+            "The branch is clean."
+        ]
+
+    def test_process_monitor_failure_is_non_fatal(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+
+        with patch("agent.turn_finalizer.extract_claims_from_response", side_effect=RuntimeError("boom")):
+            result = _drive_simple_turn(agent, "status?", content="The branch is clean.")
+
+        assert result["final_response"] == "The branch is clean."
+        assert result["completed"] is True
+        assert result["cognition_trace"] is not None
+
+
+class TestAutonomyTelemetryWiring:
+    """PR18: autonomy telemetry is metadata-only and fail-open."""
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+    def test_autonomy_metadata_and_trace_are_attached(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+
+        result = _drive_simple_turn(agent, "status?", content="The branch is clean.")
+
+        assert result["final_response"] == "The branch is clean."
+        meta = result["cognition_metadata"]
+        assert meta["autonomy_enabled"] is True
+        assert meta["autonomy_level"] == "blocked_pending_evidence"
+        assert meta["autonomy_evidence_required"] is True
+        assert meta["autonomy_evidence_present"] is False
+        assert meta["autonomy_intervention_reasons"] == ["evidence_required_missing"]
+        assert result["cognition_trace"]["autonomy"]["level"] == "blocked_pending_evidence"
+        assert result["cognition_trace"]["autonomy"]["evidence_required"] is True
+
+    def test_autonomy_telemetry_failure_is_non_fatal(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+
+        with patch("agent.turn_finalizer.build_autonomy_telemetry_from_metadata", side_effect=RuntimeError("boom")):
+            result = _drive_simple_turn(agent, "status?", content="The branch is clean.")
+
+        assert result["final_response"] == "The branch is clean."
+        assert result["completed"] is True
+        assert result["cognition_trace"] is not None
+        assert result["cognition_trace"]["autonomy"]["enabled"] is False
+
+
+class TestConsistencyGuardWiring:
+    """PR3 wiring: post-generation guard runs based on verification_plan,
+    revises final_response when full guard says revise, stays non-fatal,
+    and does not pollute system prompt or persisted-but-unrelated state."""
+
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+    def test_disabled_cognition_does_not_invoke_guard(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = {"enabled": False}
+        with (
+            patch("agent.turn_finalizer.run_light_consistency_check") as light,
+            patch("agent.turn_finalizer.run_full_consistency_check") as full,
+        ):
+            _drive_simple_turn(agent, "hello")
+        light.assert_not_called()
+        full.assert_not_called()
+
+    def test_fast_route_with_none_plan_does_not_invoke_guard(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        with (
+            patch("agent.turn_finalizer.run_light_consistency_check") as light,
+            patch("agent.turn_finalizer.run_full_consistency_check") as full,
+        ):
+            _drive_simple_turn(agent, "ping")
+        # Fast mode -> verification_plan="none" -> no guard.
+        light.assert_not_called()
+        full.assert_not_called()
+        meta = agent._current_turn_cognition_metadata
+        assert meta.get("verification_ladder_enabled") is False
+        assert meta.get("verification_ladder_source_plan") == "none"
+        assert meta.get("verification_ladder_stages") == []
+        assert meta.get("verification_ladder_applied_stages") == []
+
+    def test_standard_route_invokes_light_guard(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        long_prompt = (
+            "Could you please help me draft a thoughtful and friendly multi-paragraph "
+            "note about our upcoming team picnic that covers food preferences, "
+            "accessibility needs, transportation options, weather contingencies, "
+            "and a few possible time slots so everyone can weigh in early?"
+        )
+        from agent.consistency_guard import VerificationResult
+        with (
+            patch(
+                "agent.turn_finalizer.run_light_consistency_check",
+                return_value=VerificationResult(
+                    applied=True, plan="light",
+                    original_response="candidate", final_response="candidate",
+                    changed=False,
+                ),
+            ) as light,
+            patch("agent.turn_finalizer.run_full_consistency_check") as full,
+        ):
+            _drive_simple_turn(agent, long_prompt)
+        light.assert_called_once()
+        full.assert_not_called()
+        meta = agent._current_turn_cognition_metadata
+        assert meta.get("verification_ladder_enabled") is True
+        assert meta.get("verification_ladder_source_plan") == "light"
+        assert meta.get("verification_ladder_stages") == [
+            "self_correction",
+            "fast_monitor",
+        ]
+        assert meta.get("verification_ladder_applied_stages") == [
+            "self_correction",
+            "fast_monitor",
+        ]
+        trace = meta.get("cognition_trace")
+        assert trace["route"]["mode"] == "standard"
+        assert trace["verification"]["ladder_enabled"] is True
+        assert trace["verification"]["ladder_source_plan"] == "light"
+        assert trace["verification"]["ladder_applied_stages"] == [
+            "self_correction",
+            "fast_monitor",
+        ]
+
+    def test_deep_route_invokes_full_guard(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        from agent.consistency_guard import VerificationResult
+        with (
+            patch("agent.turn_finalizer.run_light_consistency_check") as light,
+            patch(
+                "agent.turn_finalizer.run_full_consistency_check",
+                return_value=VerificationResult(
+                    applied=True, plan="full",
+                    original_response="candidate", final_response="candidate",
+                    changed=False,
+                ),
+            ) as full,
+        ):
+            _drive_simple_turn(agent, "上次的設計回顧")
+        full.assert_called_once()
+        light.assert_not_called()
+        meta = agent._current_turn_cognition_metadata
+        assert meta.get("verification_ladder_enabled") is True
+        assert meta.get("verification_ladder_source_plan") == "full"
+        assert meta.get("verification_ladder_stages") == [
+            "self_correction",
+            "fast_monitor",
+            "slow_verifier",
+        ]
+        assert meta.get("verification_ladder_applied_stages") == [
+            "self_correction",
+            "fast_monitor",
+            "slow_verifier",
+        ]
+
+    def test_full_guard_revise_overrides_final_response(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        from agent.consistency_guard import VerificationResult
+        with patch(
+            "agent.turn_finalizer.run_full_consistency_check",
+            return_value=VerificationResult(
+                applied=True, plan="full",
+                original_response="candidate", final_response="REVISED",
+                changed=True, notes=("issue:x",),
+            ),
+        ):
+            result = _drive_simple_turn(agent, "上次的設計回顧", content="candidate")
+        assert result["final_response"] == "REVISED"
+
+    def test_revise_also_updates_last_assistant_message(self, agent):
+        """If the guard rewrote the response, the last assistant message
+        in messages must reflect the revised text so persistence and
+        downstream hooks see the same text the caller does."""
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        from agent.consistency_guard import VerificationResult
+        with patch(
+            "agent.turn_finalizer.run_full_consistency_check",
+            return_value=VerificationResult(
+                applied=True, plan="full",
+                original_response="candidate", final_response="REVISED",
+                changed=True,
+            ),
+        ):
+            result = _drive_simple_turn(agent, "上次的設計回顧", content="candidate")
+        # Walk the returned messages list for the last assistant entry.
+        assistant_msgs = [m for m in result["messages"] if m.get("role") == "assistant"]
+        assert assistant_msgs, "expected at least one assistant message"
+        assert assistant_msgs[-1]["content"] == "REVISED"
+
+    def test_guard_exception_is_non_fatal(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        with patch(
+            "agent.turn_finalizer.run_full_consistency_check",
+            side_effect=RuntimeError("guard upstream exploded"),
+        ):
+            result = _drive_simple_turn(agent, "上次的設計回顧", content="candidate")
+        assert result["completed"] is True
+        # Candidate must survive the guard failure.
+        assert result["final_response"] == "candidate"
+
+    def test_ladder_metadata_exception_does_not_skip_full_guard(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        from agent.consistency_guard import VerificationResult
+        with (
+            patch(
+                "agent.turn_finalizer.resolve_verification_ladder",
+                side_effect=RuntimeError("ladder planner exploded"),
+            ),
+            patch(
+                "agent.turn_finalizer.run_full_consistency_check",
+                return_value=VerificationResult(
+                    applied=True, plan="full",
+                    original_response="candidate", final_response="candidate",
+                    changed=False,
+                ),
+            ) as full,
+        ):
+            result = _drive_simple_turn(agent, "上次的設計回顧", content="candidate")
+        assert result["completed"] is True
+        assert result["final_response"] == "candidate"
+        full.assert_called_once()
+        assert "verification_ladder_enabled" not in agent._current_turn_cognition_metadata
+
+    def test_cognition_trace_builder_exception_is_non_fatal(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        with patch(
+            "agent.turn_finalizer.build_cognition_turn_trace",
+            side_effect=RuntimeError("trace builder exploded"),
+        ):
+            result = _drive_simple_turn(agent, "ping", content="candidate")
+        assert result["completed"] is True
+        assert result["final_response"] == "candidate"
+        assert result["cognition_trace"] is None
+        assert "cognition_trace" not in agent._current_turn_cognition_metadata
+
+    def test_turn_metadata_records_verification_outcome(self, agent):
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        from agent.consistency_guard import VerificationResult
+        with patch(
+            "agent.turn_finalizer.run_full_consistency_check",
+            return_value=VerificationResult(
+                applied=True, plan="full",
+                original_response="candidate", final_response="REVISED",
+                changed=True, notes=("issue:wrong",),
+            ),
+        ):
+            _drive_simple_turn(agent, "上次的設計回顧", content="candidate")
+        meta = agent._current_turn_cognition_metadata
+        assert meta.get("verification_applied") is True
+        assert meta.get("verification_plan") == "full"
+        assert meta.get("verification_changed") is True
+        assert "issue:wrong" in (meta.get("verification_notes") or [])
+
+    def test_disabled_cognition_does_not_invalidate_system_prompt_cache(self, agent):
+        """Belt-and-suspenders for the "no system-prompt mutation" rule."""
+        self._setup_agent(agent)
+        agent._cognition_config = {"enabled": False}
+        cached_before = agent._cached_system_prompt
+        _drive_simple_turn(agent, "hello")
+        assert agent._cached_system_prompt == cached_before
+
+    def test_full_guard_does_not_invalidate_system_prompt_cache(self, agent):
+        """Same invariant for the active full-guard path."""
+        self._setup_agent(agent)
+        agent._cognition_config = _FAST_COGNITION_CFG
+        cached_before = agent._cached_system_prompt
+        from agent.consistency_guard import VerificationResult
+        with patch(
+            "agent.turn_finalizer.run_full_consistency_check",
+            return_value=VerificationResult(
+                applied=True, plan="full",
+                original_response="candidate", final_response="REVISED",
+                changed=True,
+            ),
+        ):
+            _drive_simple_turn(agent, "上次的設計回顧")
+        assert agent._cached_system_prompt == cached_before
+
+    def test_consistency_check_false_does_not_disable_full_guard_wiring(self, agent):
+        """PR4 contract pin at the integration layer: even when the route
+        the router emits has consistency_check=False, the wiring must
+        still dispatch the full guard because verification_plan="full"
+        is the only signal the dispatch layer reads. Real scenario:
+        deep mode triggered, but the user set
+        cognition.consistency_guard.enabled=false in their config — the
+        router emits CognitiveRoute(verification_plan="full",
+        consistency_check=False). PR4 says the guard must still run."""
+        self._setup_agent(agent)
+        cfg = dict(_FAST_COGNITION_CFG)
+        cfg["consistency_guard"] = {"enabled": False, "deep_mode_only": True}
+        agent._cognition_config = cfg
+        from agent.consistency_guard import VerificationResult
+        with patch(
+            "agent.turn_finalizer.run_full_consistency_check",
+            return_value=VerificationResult(
+                applied=True, plan="full",
+                original_response="candidate", final_response="candidate",
+                changed=False,
+            ),
+        ) as full:
+            _drive_simple_turn(agent, "上次的設計回顧")
+        # Even though the resolved route has consistency_check=False, the
+        # full guard MUST still have been called because verification_plan
+        # is "full".
+        assert agent._current_cognitive_route.consistency_check is False
+        full.assert_called_once()
