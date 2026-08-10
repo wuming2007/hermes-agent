@@ -12,9 +12,12 @@ block its own way. That risked the four entry points drifting on:
 This module is the single source of truth. All entry points must call
 ``get_cognition_config(...)`` (when they already have the parsed config
 dict) or ``load_cognition_config_from_home(home)`` (when they need to
-read raw YAML from ``~/.hermes/config.yaml``). Pure: no I/O for
-``get_cognition_config``, only one well-bounded YAML read for
-``load_cognition_config_from_home``.
+load ``~/.hermes/config.yaml`` themselves). Pure: no I/O for
+``get_cognition_config``; ``load_cognition_config_from_home`` delegates the
+one bounded read to ``hermes_cli.config.load_config_readonly()`` (the
+canonical, guard-enforced loader — see v0.20's
+``tests/hermes_cli/test_config_read_guard.py``) rather than reading the
+YAML file itself.
 
 Normalization rules — kept narrow on purpose so PR4 stays a cleanup
 rather than a behavior change:
@@ -74,18 +77,32 @@ def get_cognition_config(config: Any) -> dict:
 def load_cognition_config_from_home(hermes_home: Path) -> dict:
     """Read ``<hermes_home>/config.yaml`` and return the normalized cognition block.
 
-    Returns ``{}`` on any failure (file missing, YAML parse error,
-    cognition block missing or malformed). This matches the
-    pre-PR4 ``_load_cognition_config`` shape gateway used to ship.
+    Routes through ``hermes_cli.config.load_config_readonly()`` scoped to
+    ``hermes_home`` via ``set_hermes_home_override`` (the same seam
+    ``_profile_runtime_scope`` / ``profiles.py`` / ``kanban_db.py`` use to
+    read another home's config) rather than a bare ``yaml.safe_load`` of the
+    file. A bare read would silently skip the managed-scope overlay,
+    ``${ENV_VAR}`` expansion, profile-aware pathing, and root-model
+    normalization that the canonical loader applies — see
+    ``tests/hermes_cli/test_config_read_guard.py``.
+
+    Returns ``{}`` on any failure (home unreadable, YAML parse error,
+    cognition block missing or malformed). Note that as of v0.20 the
+    ``cognition`` block ships as part of ``DEFAULT_CONFIG`` (see
+    ``hermes_cli/config_defaults.py``), so a ``hermes_home`` with no
+    ``config.yaml`` at all now returns the compiled-in cognition defaults
+    (normalized) rather than ``{}`` — this matches how every other config
+    section behaves once loaded through the canonical loader.
     """
     try:
-        cfg_path = Path(hermes_home) / "config.yaml"
-        if not cfg_path.exists():
-            return {}
-        import yaml
+        from hermes_cli.config import load_config_readonly
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
-        with open(cfg_path, encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh) or {}
+        token = set_hermes_home_override(str(hermes_home))
+        try:
+            raw = load_config_readonly()
+        finally:
+            reset_hermes_home_override(token)
     except Exception as exc:
         logger.debug("cognition config read failed (non-fatal): %s", exc)
         return {}

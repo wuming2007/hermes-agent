@@ -10,6 +10,7 @@ from agent.cognition_config import (
     get_cognition_config,
     load_cognition_config_from_home,
 )
+from hermes_cli.config import DEFAULT_CONFIG
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +99,21 @@ class TestGetCognitionConfig:
 
 
 class TestLoadCognitionConfigFromHome:
-    def test_missing_config_file_returns_empty(self, tmp_path: Path):
-        assert load_cognition_config_from_home(tmp_path) == {}
+    def test_missing_config_file_returns_compiled_in_defaults(self, tmp_path: Path):
+        # v0.20: load_cognition_config_from_home routes through the canonical
+        # hermes_cli.config.load_config_readonly() loader (required by
+        # tests/hermes_cli/test_config_read_guard.py — bare yaml.safe_load of
+        # config.yaml outside owner modules is now banned). That loader always
+        # deep-merges DEFAULT_CONFIG, and the `cognition` block itself now
+        # ships inside DEFAULT_CONFIG (hermes_cli/config_defaults.py), so a
+        # hermes_home with no config.yaml at all surfaces the compiled-in
+        # cognition defaults rather than {} — matching how every other config
+        # section behaves once loaded through the canonical path. Pre-v0.20
+        # this asserted `== {}` because the old bare read had no notion of
+        # defaults at all.
+        result = load_cognition_config_from_home(tmp_path)
+        assert result == get_cognition_config(DEFAULT_CONFIG)
+        assert result["enabled"] is False
 
     def test_loads_block_from_yaml(self, tmp_path: Path):
         (tmp_path / "config.yaml").write_text(
@@ -110,15 +124,31 @@ class TestLoadCognitionConfigFromHome:
         assert result["enabled"] is True
         assert result["fast_mode"]["max_chars"] == 100
 
-    def test_malformed_yaml_returns_empty_safely(self, tmp_path: Path):
+    def test_malformed_yaml_falls_back_to_compiled_in_defaults(self, tmp_path: Path):
+        # An unparseable config.yaml makes load_config_readonly() fall back to
+        # DEFAULT_CONFIG (no last-known-good exists for a fresh process/tmp
+        # home), so this hits the same compiled-in-defaults path as a missing
+        # file rather than returning {}.
         (tmp_path / "config.yaml").write_text("::: not yaml at all", encoding="utf-8")
-        assert load_cognition_config_from_home(tmp_path) == {}
+        result = load_cognition_config_from_home(tmp_path)
+        assert result == get_cognition_config(DEFAULT_CONFIG)
 
-    def test_yaml_without_cognition_returns_empty(self, tmp_path: Path):
+    def test_yaml_without_cognition_returns_compiled_in_defaults(self, tmp_path: Path):
+        # No `cognition` key in the user's file means nothing overrides the
+        # DEFAULT_CONFIG cognition block during the canonical loader's
+        # deep-merge, so it comes through unchanged instead of {}.
         (tmp_path / "config.yaml").write_text("model:\n  name: x\n", encoding="utf-8")
-        assert load_cognition_config_from_home(tmp_path) == {}
+        result = load_cognition_config_from_home(tmp_path)
+        assert result == get_cognition_config(DEFAULT_CONFIG)
 
-    def test_disabled_block_loads_unchanged(self, tmp_path: Path):
+    def test_disabled_block_loads_merged_with_compiled_in_defaults(self, tmp_path: Path):
+        # The user only sets `enabled: false` (already the compiled-in
+        # default). The canonical loader's _deep_merge is per-key, so the
+        # sub-blocks the user didn't mention (fast_mode, deep_mode_triggers,
+        # consistency_guard) still come from DEFAULT_CONFIG rather than being
+        # absent — the merged result is indistinguishable from the pure
+        # defaults case here, unlike the old bare-YAML read which returned
+        # exactly and only what the user wrote (`{"enabled": False}`).
         (tmp_path / "config.yaml").write_text("cognition:\n  enabled: false\n", encoding="utf-8")
         result = load_cognition_config_from_home(tmp_path)
-        assert result == {"enabled": False}
+        assert result == get_cognition_config(DEFAULT_CONFIG)
