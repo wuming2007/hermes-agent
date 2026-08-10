@@ -38,6 +38,8 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
+from agent.memory_ranker import MemoryCandidate
+
 logger = logging.getLogger(__name__)
 
 
@@ -142,6 +144,58 @@ class MemoryProvider(ABC):
         per-session scoping can ignore it.
         """
         return ""
+
+    def prefetch_layered(
+        self,
+        query: str,
+        *,
+        layers,
+        session_id: str = "",
+    ) -> str:
+        """Layer-aware recall for the upcoming turn (PR2).
+
+        ``layers`` is a tuple of strings drawn from ``("principles",
+        "semantic", "episodic")`` describing which memory layers the cognitive
+        router selected for this turn. Providers that understand layers should
+        override this and consult only the requested layers; providers that
+        don't can leave the default, which transparently delegates to the
+        legacy :meth:`prefetch`. This keeps PR2 backward-compatible — every
+        existing provider continues to work when the run loop starts using
+        the layered path.
+        """
+        return self.prefetch(query, session_id=session_id)
+
+    def prefetch_candidates(
+        self,
+        query: str,
+        *,
+        layers=(),
+        session_id: str = "",
+    ) -> list[MemoryCandidate]:
+        """Return structured memory candidates for deterministic ranking (PR13).
+
+        Providers that can expose scored/metadata-rich recall items should
+        override this hook. The default returns an empty list so existing
+        providers keep their legacy text prefetch behavior unchanged.
+        """
+        return []
+
+    def describe_memory_object_metadata(self) -> Dict[str, Any]:
+        """Describe provider-supported memory metadata keys (PR14).
+
+        Providers can override this to declare source-trace / confidence /
+        verification metadata support. The default keeps existing providers
+        fully backward-compatible.
+        """
+        return {}
+
+    def prefetch_policy_items(self, query: str, *, session_id: str = "") -> list[Any]:
+        """Return first-class policy / constitution memory items (PR15).
+
+        Providers can override this to expose policy-like memories for explicit
+        recall/citation. Default no-op keeps existing providers unchanged.
+        """
+        return []
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Queue a background recall for the NEXT turn.

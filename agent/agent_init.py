@@ -1829,6 +1829,17 @@ def init_agent(
         _api_retries = 3
     agent._api_max_retries = _api_retries
 
+    # Cognitive routing scaffold (PR1). Disabled by default; when enabled,
+    # each turn gets classified into fast/standard/deep with retrieval and
+    # verification metadata for downstream layers to consume.
+    # Loaded via the shared PR4 helper so AIAgent / CLI / gateway / cron
+    # apply identical normalization (malformed sub-blocks → {}, etc.).
+    from agent.cognition_config import get_cognition_config as _get_cognition_config
+
+    agent._cognition_config = _get_cognition_config(_agent_cfg)
+    agent._current_cognitive_route = None
+    agent._current_turn_cognition_metadata = {}
+
     # Initialize context compressor for automatic context management
     # Compresses conversation when approaching model's context limit
     # Configuration via config.yaml (compression section)

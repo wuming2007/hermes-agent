@@ -136,6 +136,8 @@ class TestMemoryProviderABC:
         p.on_memory_write("add", "memory", "test")
         p.queue_prefetch("query")
         p.sync_turn("user", "assistant")
+        assert p.describe_memory_object_metadata() == {}
+        assert p.prefetch_policy_items("send email") == []
         p.shutdown()
 
 
