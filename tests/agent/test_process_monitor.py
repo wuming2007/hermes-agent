@@ -33,6 +33,12 @@ def test_extract_claims_from_bullets_and_sentences_is_deterministic():
     ]
 
 
+def test_extract_claims_splits_cjk_sentences_that_end_without_a_space():
+    claims = extract_claims_from_response("我已寫入設定檔。測試全部通過！他說「好了。」然後離開。")
+
+    assert [claim.text for claim in claims] == ["我已寫入設定檔。", "測試全部通過！", "他說「好了。」然後離開。"]
+
+
 def test_extract_claims_classifies_action_status_policy_and_factual():
     response = """
     I checked the runtime status.

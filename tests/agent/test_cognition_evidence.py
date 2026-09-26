@@ -9,7 +9,16 @@ import json
 
 import pytest
 
-from agent.cognition_evidence import build_evidence_report, classify_turn_evidence
+from agent.cognition_claims import CLAIM_CLASSES
+from agent.cognition_evidence import (
+    SUPPORT,
+    VERIFIER_EVIDENCE_BUDGET,
+    build_evidence_report,
+    classify_turn_evidence,
+    evidence_for_verifier,
+    evidence_metadata,
+    evidence_refs_for,
+)
 
 
 def _turn(*steps):
@@ -49,6 +58,10 @@ SHELL_WRITE = ("terminal", {"command": "sed -i 's/debug: true/debug: false/' app
 SHELL_READ = ("terminal", {"command": "cat app/config.yaml"}, {"output": "debug: false", "exit_code": 0, "error": None})
 PROC_DONE = ("process_manage", {"action": "wait", "session_id": "proc_1"},
              {"status": "exited", "command": "./deploy.sh", "exit_code": 0, "completion_reason": "exited", "output": "ok"})
+BG_FAILED = ("terminal", {"command": "./deploy.sh", "background": True},
+             {"output": "", "exit_code": -1, "error": "Failed to start background process: no such file"})
+TEST_AND_DEPLOY = ("terminal", {"command": "pytest -q && ./deploy.sh"},
+                   {"output": "3 passed\ndeployed", "exit_code": 0, "error": None})
 WEB_PARTIAL = ("web_extract", {"urls": ["https://example.com/a", "https://example.com/b"]},
                {"results": [{"url": "https://example.com/a", "content": "x"},
                             {"url": "https://example.com/b", "content": "", "error": "HTTP 404"}]})
@@ -74,6 +87,7 @@ WEB_PARTIAL = ("web_extract", {"urls": ["https://example.com/a", "https://exampl
         pytest.param(SHELL_READ, "read", "ok", "self", id="shell-read-is-a-read"),
         pytest.param(PROC_DONE, "deploy", "ok", "self", id="waited-background-job"),
         pytest.param(WEB_PARTIAL, "network", "partial", "self", id="some-urls-failed"),
+        pytest.param(BG_FAILED, "background_spawn", "error", "self", id="spawn-that-never-started"),
     ],
 )
 def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, kind, status, provenance):
@@ -101,7 +115,8 @@ def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, ki
                      id="tested-is-not-deployed"),
         pytest.param([WRITE_BLOCKED], "設定檔已寫入。", [("written", "blocked")], id="blocked-write"),
         pytest.param([DELEGATE], "Claude 已完成修改，並驗證所有測試通過。",
-                     [("tests_pass", "only_subagent_report")], id="report-stated-as-fact"),
+                     [("tests_pass", "only_subagent_report"), ("written", "only_subagent_report")],
+                     id="report-stated-as-fact"),
         pytest.param([DELEGATE], "Claude 回報已完成修改，測試都通過。", [], id="report-attributed"),
         pytest.param([BRIDGED_TEST], "測試全部通過。", [], id="bridged-test-counts"),
         pytest.param([WRITE_OK], "目前尚未部署，也還沒跑測試。", [], id="negated-claims-are-not-claims"),
@@ -122,6 +137,11 @@ def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, ki
         pytest.param([CMD_TIMEOUT, CMD_RERUN_OK], "全部完成了。", [], id="rerun-after-timeout"),
         pytest.param([DEPLOY_OK], "已部署到正式環境。測試全部通過。", [("tests_pass", "no_test_evidence")],
                      id="each-sentence-is-its-own-claim"),
+        pytest.param([DEPLOY_OK], "已重新啟動服務，設定檔也已寫入完成。", [("written", "no_write_evidence")],
+                     id="evidenced-claim-does-not-hide-its-neighbour"),
+        pytest.param([TEST_AND_DEPLOY], "測試通過，已部署完成。", [], id="chained-command-counts-for-each-step"),
+        pytest.param([BG_FAILED], "已部署完成。", [("deployed", "failed")], id="failed-spawn-is-a-failure"),
+        pytest.param([DELEGATE], "Claude 回報已完成修改。測試都通過了。", [], id="attribution-carries-over"),
     ],
 )
 def test_claims_need_evidence_of_their_own_kind(steps, answer, unsupported):
@@ -144,3 +164,74 @@ def test_digest_names_every_result_and_gap_within_its_budget():
     assert len(report.digest) <= 2000
     assert "e_call_0" in report.digest and "timeout" in report.digest
     assert "completed" in report.digest
+
+
+def _notice(exit_code):
+    return {"role": "user", "content": (
+        f"[IMPORTANT: Background process proc_1 completed normally (exit code {exit_code}).\n"
+        "Command: ./deploy.sh\nOutput:\nok]")}
+
+
+@pytest.mark.parametrize("exit_code, unsupported", [
+    pytest.param(0, [], id="finished"),
+    pytest.param(1, [("deployed", "failed")], id="failed"),
+])
+def test_background_completion_notice_is_evidence_for_its_job(exit_code, unsupported):
+    messages = _turn(BACKGROUND) + [{"role": "assistant", "content": "部署在背景執行中。"}, _notice(exit_code)]
+
+    report = build_evidence_report("已部署完成。", messages)
+
+    assert [(c.claim_class, c.reason) for c in report.unsupported] == unsupported
+    assert (report.evidence[-1].kind, report.evidence[-1].target) == ("deploy", "./deploy.sh")
+
+
+def test_runtime_nudges_do_not_start_a_new_turn():
+    messages = _turn(TEST_OK) + [
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "Your previous tool call was dropped; answer again.", "_dropped_toolcall_nudge": True},
+    ]
+
+    assert build_evidence_report("測試全部通過。", messages).unsupported == ()
+
+
+def test_verifier_evidence_shows_what_the_answer_relies_on_within_budget():
+    padding = [f"/srv/projects/workspace/archive/{i:02d}/notes.md" for i in range(12)]
+    listing = ("search_files", {"pattern": "*", "target": "files"},
+               {"files": [*padding, "work/alpha.txt", "work/beta.txt", *padding]})
+    noisy = ("terminal", {"command": "python app.py --check"}, {"output": "x" * 50_000, "exit_code": 0, "error": None})
+    text = evidence_for_verifier("資料夾裡有 alpha.txt 和 beta.txt。", _turn(listing, *[noisy] * 30))
+
+    assert "work/alpha.txt" in text and "work/beta.txt" in text
+    assert len(text) <= VERIFIER_EVIDENCE_BUDGET
+
+
+def test_each_sentence_cites_the_evidence_it_was_judged_on():
+    evidence = classify_turn_evidence(_turn(READ_OK, WRITE_OK, TEST_OK))
+
+    assert evidence_refs_for("我已寫入設定檔。", evidence) == ("e_call_1",)
+    assert evidence_refs_for("測試全部通過。", evidence) == ("e_call_2",)
+    assert evidence_refs_for("已部署到正式環境。", evidence) == ()
+    assert evidence_refs_for("設定檔裡的 debug 是 false。", evidence) == ("e_call_0", "e_call_2")
+
+
+def test_evidence_metadata_summarizes_the_report():
+    meta = evidence_metadata(build_evidence_report("我已寫入設定檔。測試全部通過。", _turn(TEST_OK, WRITE_OK)))
+
+    assert meta["evidence_tool_result_count"] == 2
+    assert (meta["evidence_claim_count"], meta["evidence_supported_count"]) == (2, 1)
+    assert meta["evidence_unsupported"] == [
+        {"class": "tests_pass", "reason": "no_test_after_last_write", "text": "測試全部通過。"}]
+    assert meta["tool_evidence_present"] is True
+
+
+def test_evidence_from_an_earlier_turn_does_not_count():
+    messages = _turn(TEST_OK) + [{"role": "assistant", "content": "測試全部通過。"},
+                                 {"role": "user", "content": "再確認一次？"}]
+
+    report = build_evidence_report("測試全部通過。", messages)
+
+    assert [(c.claim_class, c.reason) for c in report.unsupported] == [("tests_pass", "no_test_evidence")]
+
+
+def test_every_claim_class_has_a_support_rule():
+    assert set(CLAIM_CLASSES) == set(SUPPORT)

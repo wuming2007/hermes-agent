@@ -154,7 +154,8 @@ def _split_plain_text_claims(response: str) -> list[str]:
         line = re.sub(r"^(?:[-*•]|\d+[.)])\s+", "", line).strip()
         if not line:
             continue
-        parts = re.split(r"(?<=[.!?。！？])\s+", line)
+        # CJK sentences end at 。！？ with no space after; a closing bracket stays with its sentence.
+        parts = re.split(r"(?<=[.!?])\s+|(?<=[。！？])(?![」』）)\]])\s*", line)
         for part in parts:
             text = part.strip()
             if text:
