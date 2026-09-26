@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from typing import Any, Optional
 
 from plugins.cognition_wm import runtime
@@ -32,10 +33,12 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
         from hermes_constants import hermes_home_key
 
         item = classify_tool_result(tool_name, args, result, tool_call_id)
+        # A call without an id of its own (made inside another tool) still gets its own row.
+        evidence_id = item.evidence_id if tool_call_id else f"e_{uuid.uuid4().hex[:16]}"
         turn = runtime.current_turn(session_id)
         focus = runtime.focus_task(turn) if turn else None
         runtime.store().record_evidence(
-            evidence_id=item.evidence_id, task_id=focus.task_id if focus else None, session_id=session_id or "",
+            evidence_id=evidence_id, task_id=focus.task_id if focus else None, session_id=session_id or "",
             turn_id=turn_id or "", tool_call_id=tool_call_id or None, tool_name=item.tool_name, kind=item.kind,
             status="blocked" if status == "blocked" else item.status, provenance=item.provenance,
             target=_redacted(item.target), excerpt=_redacted(item.text), duration_ms=duration_ms,

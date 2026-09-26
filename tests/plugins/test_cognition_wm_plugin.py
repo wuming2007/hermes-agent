@@ -120,6 +120,17 @@ def test_tool_results_become_evidence_of_the_focus_task(tmp_path, monkeypatch):
     assert f"e_{read_call}" in store.evidence_ids(task.task_id)
 
 
+def test_every_tool_result_is_its_own_evidence_even_without_a_call_id(tmp_path, monkeypatch):
+    from plugins.cognition_wm import evidence_link, runtime
+
+    monkeypatch.chdir(tmp_path)
+    for path in ("a.txt", "b.txt"):
+        evidence_link.on_post_tool_call(tool_name="read_file", args={"path": path}, result='{"content": "x"}',
+                                        session_id="s-none", tool_call_id="", turn_id="t1", status="ok")
+
+    assert len(runtime.store().evidence_ids()) == 2
+
+
 def test_a_runtime_notice_cannot_create_a_task(tmp_path, monkeypatch):
     notice = "[IMPORTANT: Background process p1 completed normally (exit code 0).\nCommand: ./job.sh\nOutput:\nok]"
     script = [_task_state(action="create", title="x", goal="y", kind="other"), Text("ok")]
