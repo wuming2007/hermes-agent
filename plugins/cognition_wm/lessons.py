@@ -65,8 +65,9 @@ _TEACHES = {"directive": _ACTIONS, "correction": _PRESCRIBES}
 _QUESTION = re.compile(r"是否|有沒有|嗎|[？?]|請|幫我|幫忙|看看|一下|\b(?:can|could|would)\s+you\b|\bplease\b",
                        re.IGNORECASE)
 _NEGATIVE_RESULT = re.compile(
-    r"沒過|沒有過|沒有通過|沒通過|失敗|不行|沒成功|壞了|不能用|\bfail(?:s|ed|ing)?\b|\bbroken\b|\bdoesn'?t\s+work\b"
-    r"|\bnot\s+working\b", re.IGNORECASE)
+    r"沒過|沒有過|沒有通過|沒通過|失敗|不行|沒成功|壞了|不能用|沒(?:有)?(?:部署|上線|生效|更新|改到|跑|完成|修好)"
+    r"|\bfail(?:s|ed|ing)?\b|\bbroken\b|\bdoesn'?t\s+work\b|\bnot\s+working\b|\bnever\s+(?:ran|deployed)\b",
+    re.IGNORECASE)
 # Words that would take away a check or an approval: a permission, never a lesson.
 _LOOSENS = re.compile(
     r"不用(?:再)?(?:問|確認|檢查|測試|跑測試)|不必(?:再)?(?:問|確認)|不需要(?:再)?(?:問|確認)|免問|不用經過我"
@@ -170,6 +171,18 @@ def says_wrong(text: str) -> bool:
     """Whether the owner says what was just done or claimed is wrong (a correction to count)."""
     flat = " ".join(str(text or "").split())
     return bool(_WRONG.search(flat) or _NEGATIVE_RESULT.search(flat))
+
+
+def correction_kind(cue: Optional[LessonCue], text: str) -> Optional[str]:
+    """What the owner corrects in the last answer: ``result`` (it did not hold — "測試根本沒過",
+    "不對" with nothing else to do), ``approach`` (how it was done — "要用 uv run pytest"), or None.
+    Correcting the approach says nothing about whether a result our own check showed was true."""
+    flat = " ".join(str(text or "").split())
+    if _NEGATIVE_RESULT.search(flat):
+        return "result"
+    if cue is not None and cue.kind == "correction":
+        return "approach"
+    return "result" if _WRONG.search(flat) else None
 
 
 def _ascii_terms(text: str) -> list[str]:

@@ -234,3 +234,16 @@ def test_the_users_correction_marks_the_last_claim_corrected(tmp_path, monkeypat
     (outcome,) = _store().outcomes(actor_kind="self")
     assert (outcome.result, outcome.prior_result, outcome.intervention.get("corrections")) == ("corrected", "success", 1)
     assert _live() == []  # saying it is wrong says nothing about how to do it
+
+
+def test_correcting_how_it_was_done_keeps_a_checked_result_and_counts_the_users_effort(tmp_path, monkeypatch):
+    """A correction of the approach ("要用 uv run pytest") says how the user wants it done, not that
+    a result our own check showed was false: the success stands, the correction is its cost."""
+    script = []
+    with Chat(tmp_path, monkeypatch, lambda r: script.pop(0) if script else Text("好。")) as chat:
+        script += [_terminal(chat.cmd("pytest -q")), Text("測試都通過了。"), Text("好，改用 uv run pytest。")]
+        chat.turn("s1", "幫我跑測試")
+        chat.turn("s1", "不對，要用 uv run pytest，不是直接 pytest")
+
+    (outcome,) = _store().outcomes(actor_kind="self")
+    assert (outcome.result, outcome.prior_result, outcome.intervention.get("corrections")) == ("success", None, 1)

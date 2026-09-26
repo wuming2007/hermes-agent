@@ -21,8 +21,16 @@ from typing import Any, Callable, Optional, Sequence
 
 from plugins.cognition_wm import calibration, outcomes, recall, runtime
 from plugins.cognition_wm.experience_store import ExperienceStore
-from plugins.cognition_wm.lessons import LessonCue, draft_lesson, read_cue, same_topic, same_wording, says_wrong, work_kind
-from plugins.cognition_wm.lessons import search_terms
+from plugins.cognition_wm.lessons import (
+    LessonCue,
+    correction_kind,
+    draft_lesson,
+    read_cue,
+    same_topic,
+    same_wording,
+    search_terms,
+    work_kind,
+)
 from plugins.cognition_wm.model import Experience, SourceRef, Task, clip
 from plugins.cognition_wm.provenance import RUN_ID, turn_source
 
@@ -223,12 +231,16 @@ _CUE_ACTIONS: dict[str, Callable[..., list[str]]] = {
 
 def _relabel_last_turn(wm: ExperienceStore, state: runtime.TurnState, last: dict, cue: Optional[LessonCue],
                        text: str) -> None:
-    """The owner's word on the last answer: wrong marks our claims there corrected; a confirmed
-    result makes the unknown or reported ones there a success."""
+    """The owner's word on the last answer. Saying a result did not hold marks our claims there
+    corrected; correcting how it was done leaves what they read and counts as the user's effort; a
+    confirmed result makes the unknown or reported ones there a success."""
     there = wm.outcomes(session_id=last.get("session"), turn_id=last.get("turn"))
-    if says_wrong(text) or (cue is not None and cue.kind == "correction"):
-        wm.relabel_outcomes([o.outcome_id for o in there if o.actor_kind == "self" and o.result not in ("corrected", "blocked")],
-                            "corrected", source=_owner(state), correction=True)
+    ours = [o.outcome_id for o in there if o.actor_kind == "self" and o.result not in ("corrected", "blocked")]
+    corrected = correction_kind(cue, text)
+    if corrected == "result":
+        wm.relabel_outcomes(ours, "corrected", source=_owner(state), correction=True)
+    elif corrected == "approach":
+        wm.note_corrections(ours)
     elif cue is not None and cue.kind == "result_confirmation":
         wm.relabel_outcomes([o.outcome_id for o in there if o.result in ("unknown", "reported")], "success",
                             source=_owner(state))

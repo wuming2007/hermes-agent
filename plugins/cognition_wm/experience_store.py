@@ -365,6 +365,20 @@ class ExperienceStore(WorkingMemoryStore):
                 changed += 1
         return changed
 
+    def note_corrections(self, outcome_ids: Iterable[str]) -> int:
+        """Count a correction of how the work was done against outcomes, leaving what they read."""
+        noted = 0
+        with self._write() as conn:
+            for outcome_id in dict.fromkeys(outcome_ids):
+                row = conn.execute("SELECT intervention FROM outcomes WHERE outcome_id=?", (outcome_id,)).fetchone()
+                if row is None:
+                    continue
+                intervention = json.loads(row["intervention"])
+                intervention["corrections"] = int(intervention.get("corrections") or 0) + 1
+                conn.execute("UPDATE outcomes SET intervention=? WHERE outcome_id=?", (_dumps(intervention), outcome_id))
+                noted += 1
+        return noted
+
     def forget_outcomes(self, *, project_key: Optional[str] = None) -> int:
         where, params = ("project_key=?", (project_key,)) if project_key is not None else ("1=1", ())
         with self._write() as conn:

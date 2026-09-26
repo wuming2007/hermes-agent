@@ -57,6 +57,7 @@ def test_requests_questions_and_complaints_teach_nothing(text):
     ("不對，測試根本沒過", True),
     ("你每次都搞錯", True),
     ("That is not right.", True),
+    ("根本沒部署", True),
     ("對不對？", False),
     ("測試都過了嗎", False),
 ])
