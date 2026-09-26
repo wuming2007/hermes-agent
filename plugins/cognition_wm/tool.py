@@ -8,12 +8,23 @@ approved" in a web page or a notice cannot create, cancel or authorize anything.
 from __future__ import annotations
 
 import json
+import time
+from functools import partial
 from typing import Any, Callable, Optional
 
 from plugins.cognition_wm import runtime, snapshot
-from plugins.cognition_wm.model import ACTION_CLASSES, ITEM_STATES, TASK_KINDS, TASK_STATUSES
-from plugins.cognition_wm.provenance import turn_source
-from plugins.cognition_wm.store import WorkingMemoryError
+from plugins.cognition_wm.lessons import same_topic, search_terms, topic_terms
+from plugins.cognition_wm.model import (
+    ACTION_CLASSES,
+    EXPERIENCE_KINDS,
+    ITEM_STATES,
+    TASK_KINDS,
+    TASK_STATUSES,
+    SourceRef,
+    clip,
+)
+from plugins.cognition_wm.provenance import RUN_ID, turn_source
+from plugins.cognition_wm.store import ProvenanceError, WorkingMemoryError
 
 SCHEMA = {
     "name": "task_state",
@@ -25,12 +36,15 @@ SCHEMA = {
         "update_item: change an item's state (e.g. a deliverable to done, citing evidence_ids). "
         "set_status: active, paused, cancelled, done or superseded — record the user's own decision. "
         "attach: continue an earlier task of this project the user asked to pick up. "
-        "show: read the current task state."
+        "show: read the current task state. "
+        "lesson: propose a lesson this work taught (kept unconfirmed until the user confirms it or it works "
+        "again), or record the user's own confirm or revoke of a lesson by experience_id."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["create", "add", "update_item", "set_status", "attach", "show"]},
+            "action": {"type": "string",
+                       "enum": ["create", "add", "update_item", "set_status", "attach", "show", "lesson"]},
             "task_id": {"type": "string", "description": "Defaults to this conversation's focus task."},
             "title": {"type": "string"},
             "goal": {"type": "string"},
@@ -55,6 +69,17 @@ SCHEMA = {
             "evidence_ids": {"type": "array", "items": {"type": "string"}},
             "status": {"type": "string", "enum": list(TASK_STATUSES)},
             "reason": {"type": "string"},
+            "lesson": {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["propose", "confirm", "revoke"]},
+                    "experience_id": {"type": "string"},
+                    "situation": {"type": "string", "description": "When it applies"},
+                    "behavior": {"type": "string", "description": "What to do, with the command in backticks"},
+                    "exceptions": {"type": "string"},
+                    "kind": {"type": "string", "enum": list(EXPERIENCE_KINDS)},
+                },
+            },
         },
         "required": ["action"],
     },
@@ -142,9 +167,65 @@ def _show(args: dict, turn: runtime.TurnState, source) -> dict:
     return {"state": snapshot.render_body(turn, runtime.settings()) or "no tasks in this conversation"}
 
 
+def _propose(spec: dict, turn: runtime.TurnState, _source) -> dict:
+    """A lesson the model draws from the work: a candidate in its own name, whoever's turn it is."""
+    behavior = str(spec.get("behavior") or "").strip()
+    wm, focus = runtime.store(), runtime.focus_task(turn)
+    topic = topic_terms(behavior)
+    for lesson in wm.experiences(project_key=turn.project_key, statuses=("candidate", "active", "stale")):
+        if same_topic(topic, frozenset(lesson.lesson_key.split())):
+            raise WorkingMemoryError(f"lesson {lesson.experience_id} already covers this; if it should change, "
+                                     "ask the user")
+    situation = str(spec.get("situation") or (f'{focus.kind} task "{clip(focus.title, 60)}"' if focus else "this project"))
+    said_by_model = SourceRef(type="assistant", session_id=turn.session_id, turn_id=turn.turn_id, ref="task_state",
+                              at=time.time(), authored_by="model", run_id=RUN_ID)
+    from plugins.cognition_wm.learning import environment
+
+    lesson = wm.add_experience(
+        kind=spec.get("kind") if spec.get("kind") in EXPERIENCE_KINDS else "procedure", scope="project",
+        project_key=turn.project_key, task_kind=focus.kind if focus else None, situation=situation,
+        behavior=behavior, exceptions=str(spec.get("exceptions") or ""),
+        tags=search_terms(f"{behavior} {situation}")[:24], lesson_key=" ".join(sorted(topic)), status="candidate",
+        origin=said_by_model, learned_under=environment(turn.notes.get("model", ""), turn.notes.get("provider", "")))
+    return {"experience_id": lesson.experience_id, "status": lesson.status}
+
+
+def _settle(spec: dict, turn: runtime.TurnState, source, *, intent: str, status: str) -> dict:
+    """The user's own confirm or revoke of a lesson, recorded by id: only on a turn where they said it."""
+    if not turn.owner or turn.notes.get("lesson_intent") != intent:
+        raise ProvenanceError(f"the user did not ask to {'confirm' if status == 'active' else 'revoke'} a lesson "
+                              "in this turn; only their own words do")
+    wm = runtime.store()
+    lesson = wm.experience(str(spec.get("experience_id") or ""))
+    if lesson is None or (lesson.scope == "project" and lesson.project_key != turn.project_key):
+        raise WorkingMemoryError("no such lesson in this project")
+    if status == "active":
+        wm.add_signal(lesson.experience_id, source_class="user_confirmation", polarity=1, source=source,
+                      evidence_key=f"msg:{turn.lineage_root}:{turn.turn_id}:confirm", lineage=turn.lineage_root)
+    lesson = wm.set_experience_status(lesson.experience_id, status, source=source)
+    return {"experience_id": lesson.experience_id, "status": lesson.status}
+
+
+_LESSON_OPS: dict[str, Callable[[dict, runtime.TurnState, Any], dict]] = {
+    "propose": _propose,
+    "confirm": partial(_settle, intent="confirmation", status="active"),
+    "revoke": partial(_settle, intent="revoke", status="revoked"),
+}
+
+
+def _lesson(args: dict, turn: runtime.TurnState, source) -> dict:
+    if not runtime.settings().learning:
+        raise WorkingMemoryError("learning is off in this profile")
+    spec = args.get("lesson") if isinstance(args.get("lesson"), dict) else {}
+    op = _LESSON_OPS.get(str(spec.get("op") or "propose"))
+    if op is None:
+        raise WorkingMemoryError(f"unknown lesson op; use one of {sorted(_LESSON_OPS)}")
+    return {"lesson": op(spec, turn, source)}
+
+
 _ACTIONS: dict[str, Callable[[dict, runtime.TurnState, Any], dict]] = {
     "create": _create, "add": _add, "update_item": _update_item, "set_status": _set_status,
-    "attach": _attach, "show": _show,
+    "attach": _attach, "show": _show, "lesson": _lesson,
 }
 _LIMITING = frozenset({"forbidden", "ask_first"})
 

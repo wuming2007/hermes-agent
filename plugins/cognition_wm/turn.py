@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any, Optional
 
-from plugins.cognition_wm import runtime, snapshot
+from plugins.cognition_wm import learning, runtime, snapshot
 from plugins.cognition_wm.intents import detect_intent
 from plugins.cognition_wm.provenance import is_owner_turn
 
@@ -44,7 +44,7 @@ def _latest_instruction(lineage_root: str, owner_text: Optional[str]) -> str:
 
 def on_pre_llm_call(*, session_id: str = "", turn_id: str = "", user_message: Any = None,
                     conversation_history: Any = None, platform: str = "", parent_session_id: str = "",
-                    sender_id: str = "", **_: Any) -> Optional[dict]:
+                    sender_id: str = "", model: str = "", provider: str = "", **_: Any) -> Optional[dict]:
     try:
         row = _current_user_row(conversation_history, user_message)
         owner = is_owner_turn(row, platform=platform or "", delegated=bool(parent_session_id))
@@ -55,13 +55,24 @@ def on_pre_llm_call(*, session_id: str = "", turn_id: str = "", user_message: An
             lineage_root=runtime.lineage_root(session_id or ""), platform=platform or "",
             intent=detect_intent(text) if owner else None,
         )
+        state.notes.update(model=model or "", provider=provider or "")
         runtime.remember_turn(state)
         runtime.prune_once()
         latest = _latest_instruction(state.lineage_root, text if owner else None)
         body = snapshot.render_body(state, runtime.settings(), latest_instruction=latest)
         context = snapshot.for_turn(body, conversation_history or [])
-        # The verifier sees no history, so it gets the whole state even when the model gets a pointer.
-        return {"context": context, "verifier_context": body} if context else None
     except Exception as exc:  # the working memory must never break a turn
         logger.warning("cognition_wm pre_llm_call failed (no snapshot this turn): %s", exc)
         return None
+    extra = learning.before_turn(state, text, conversation_history or [], model=model or "", provider=provider or "")
+    result: dict = {}
+    contexts = [piece for piece in (context, extra.context) if piece]
+    if contexts:
+        result["context"] = "\n\n".join(contexts)
+    # The verifier sees no history, so it gets the whole state even when the model gets a pointer.
+    verifier = "\n\n".join(piece for piece in (body if context else "", extra.verifier_body) if piece)
+    if verifier:
+        result["verifier_context"] = verifier
+    if extra.guidance:
+        result["turn_guidance"] = extra.guidance
+    return result or None

@@ -370,6 +370,21 @@ class ExperienceStore(WorkingMemoryStore):
         with self._write() as conn:
             return conn.execute(f"DELETE FROM outcomes WHERE {where}", params).rowcount
 
+    def verified_evidence_ids(self, task_id: str) -> set[str]:
+        """Evidence of a task that our own tools produced and that ended well."""
+        rows = self._read("SELECT evidence_id FROM evidence WHERE task_id=? AND status='ok' AND provenance='self'",
+                          (task_id,))
+        return {row["evidence_id"] for row in rows}
+
+    def owner_turns(self, task_id: str) -> int:
+        """How many of the user's own turns went into a task (a cost of the work to them)."""
+        turns = set()
+        for event in self.events(task_id):
+            source = json.loads(event["source"])
+            if source.get("authored_by") == "owner":
+                turns.add((source.get("session_id"), source.get("turn_id")))
+        return len(turns)
+
     # ------------------------------------------------------------------ upkeep
 
     def maintain(self, *, expire_after_days: float, stale_after_days: float) -> dict[str, int]:

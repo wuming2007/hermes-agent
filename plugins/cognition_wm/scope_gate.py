@@ -226,7 +226,13 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, session_id: str =
             return {"action": "block", "message": "BLOCKED: working-memory state is kept by Hermes and must not be "
                                                   "stored in long-term memory."}
         turn = runtime.current_turn(session_id)
-        return decide(tool_name, args, turn, runtime.settings()) if turn is not None else None
+        if turn is None:
+            return None
+        directive = decide(tool_name, args, turn, runtime.settings())
+        if directive is not None:  # the user's cost of the turn, for the track record
+            counter = "blocks" if directive["action"] == "block" else "asks"
+            turn.notes[counter] = int(turn.notes.get(counter, 0)) + 1
+        return directive
     except Exception as exc:
         logger.warning("cognition_wm scope gate failed (no opinion): %s", exc)
         return None
