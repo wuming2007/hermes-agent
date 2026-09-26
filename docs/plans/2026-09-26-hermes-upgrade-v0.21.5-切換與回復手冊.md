@@ -23,7 +23,7 @@
 
 ## 已知風險（切換前必讀）
 
-1. **共用 Slack token 的搶鎖**（v0.20 就存在，v0.21.5 行為相同）：三個 profile 的 `.env` 都有同一組 Slack app token，plist 都帶 `--replace`。後啟動的 gateway 在啟動階段會終止持有 Slack 的其他 profile gateway；被終止者以 0 結束，launchd（`SuccessfulExit=false`）不會重開它。**逐一重啟會讓前面的 profile 掉線。** 本手冊用「三個 profile 同時載入」重現開機時的情況，但結果不保證；若有 profile 掉線，由無名決定 Slack 歸屬（需改該 profile 設定，本次未授權，不做）。
+1. **Slack 關閉**（無名 2026-09-26：不再使用 Slack）：三個 profile 共用同一組 Slack token，plist 都帶 `--replace`，逐一重啟時後啟動者會終止持有 Slack 的其他 profile gateway（v0.20 就有）。切換時在三個 profile 設定檔加上 default 已在用的 `slack: enabled: false`（第 5b 步）。已用假 token 在隔離環境驗證：v0.20 與 v0.21.5 都只停 Slack、Telegram 照常；cron 的 10 個排程沒有送往 Slack。之後重啟順序不再影響。要恢復 Slack 時刪掉該區塊即可。
 2. **主資料庫遷移**：11.47 GB，首次開啟阻塞約 1 分鐘，期間 default gateway 不回應。
 3. **plist**：只用 `launchctl bootout/bootstrap`，不要用 `hermes gateway start/install/restart`（新版會依新模板重寫 plist）。
 4. **Python runtime 自動修復**（v0.21.5 新功能）：目前的 Python（uv cpython 3.11.15，SQLite 3.50.4）會被判定有 WAL 重設漏洞。之後若執行 `hermes update`、`hermes setup` 的終端機後端設定、computer-use 或 browser-use CLI 安裝，新版會自動把 `~/.hermes/hermes-agent/venv` 換成新的受管理 Python，而且只裝 `--extra all`；telegram / slack / feishu 套件要等 gateway 下次啟動時按需補裝（需要網路）。本手冊維持 3.11.15（和現在相同）。若之後發生自動修復，停 gateway 後在 `~/.hermes/hermes-agent` 執行 `UV_PROJECT_ENVIRONMENT=venv uv sync --locked --extra all --extra messaging --extra slack --extra feishu --extra fal --extra edge-tts`（**不要加 `--python`**，保留修復後的新 Python），再啟動 gateway。
@@ -77,15 +77,19 @@ mv "$RT/venv" "$RT/venv.v0.20-$TS"
 # 5) import smoke（隔離 HERMES_HOME，不寫正式資料）
 HERMES_HOME=$(mktemp -d) "$RT/venv/bin/python" -c "import run_agent, gateway.run, cron.scheduler, telegram, slack_bolt, aiohttp, agent.cognition_routing; from hermes_cli import __version__; print('ok', __version__)"
 
-# 6) 啟動：default 先（做主資料庫遷移），確認上線後三個 profile 同時載入
+# 5b) 關閉三個 profile 的 Slack（與 default 相同設定；原檔已在第 2 步備份）
+for p in tianji tianquan yuheng; do f=~/.hermes/profiles/$p/config.yaml; grep -qE '^slack:' "$f" || printf '\nslack:\n  enabled: false\n' >> "$f"; done
+for p in tianji tianquan yuheng; do HERMES_HOME=~/.hermes/profiles/$p "$RT/venv/bin/python" -c "from gateway.config import load_gateway_config, Platform as P; c = load_gateway_config(); print('$p', 'slack', c.platforms[P.SLACK].enabled if P.SLACK in c.platforms else None, 'telegram', c.platforms[P.TELEGRAM].enabled)"; done   # 預期 slack False、telegram True
+
+# 6) 啟動：default 先（做主資料庫遷移），上線後再啟動三個 profile（Slack 已關，順序不影響）
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.gateway.plist
 tail -f ~/.hermes/logs/gateway.log       # 看到 "telegram connected" 後 Ctrl-C
-for p in tianji tianquan yuheng; do launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.gateway-$p.plist & done; wait
+for p in tianji tianquan yuheng; do launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.gateway-$p.plist; done
 
 # 7) 驗證
 launchctl list | grep ai.hermes                                            # 4 個都有 PID
 sqlite3 "file:$HOME/.hermes/state.db?mode=ro" "SELECT version FROM schema_version"   # 30
-ls ~/.local/state/hermes/gateway-locks/                                    # 誰持有 slack / telegram
+ls ~/.local/state/hermes/gateway-locks/                                    # telegram 各一；slack 不再有新的持有者
 "$RT/venv/bin/hermes" --version                                            # v0.21.5
 "$RT/venv/bin/hermes" chat -q "say hi in 3 words" -Q                      # 真實模型、正式資料
 grep -iE 'cognit|consistency_guard|Traceback' ~/.hermes/logs/errors.log | tail
@@ -104,8 +108,8 @@ while pgrep -f 'hermes_cli.main.*gateway run' >/dev/null; do sleep 1; done
 git -C "$RT" switch cognitive-stack-v0.20                                 # e6910a9
 mv "$RT/venv" "$RT/venv.v0.21.5-rollback-$(date +%Y%m%d-%H%M)" && mv "$OLD" "$RT/venv"
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.gateway.plist
-for p in tianji tianquan yuheng; do launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.gateway-$p.plist & done; wait
-# 若切換時改過 launcher：
+for p in tianji tianquan yuheng; do launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.gateway-$p.plist; done
+# Slack 維持關閉（v0.20 同樣有效）；若切換時改過 launcher：
 ln -sfn /Volumes/Data/openclaw/workspace/hermes-agent/.venv/bin/hermes /Users/wuming/.local/bin/hermes
 ```
 
