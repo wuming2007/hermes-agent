@@ -202,28 +202,152 @@ def test_authorizations_decide_execution_tools(tmp_path, monkeypatch, authorizat
         assert decision["rule_key"] == f"cognition:{task.task_id}:code_change"
 
 
+def _stop(task, status):
+    import plugins.cognition_wm.provenance as provenance
+    from plugins.cognition_wm import runtime
+
+    runtime.store().set_status(task.task_id, status, expected_revision=None, reason="使用者叫停",
+                               source=provenance.turn_source(owner=True, session_id="s1", turn_id="t0"))
+
+
+@pytest.mark.parametrize(
+    "tool_name, args",
+    [
+        pytest.param("browser_click", {"ref": "e12"}, id="browser-click"),
+        pytest.param("browser_type", {"ref": "e3", "text": "hello"}, id="browser-type"),
+        pytest.param("browser_exec", {"code": "document.forms[0].submit()"}, id="browser-script"),
+        pytest.param("browser_cdp", {"method": "Input.dispatchKeyEvent"}, id="browser-devtools"),
+        pytest.param("computer_use", {"action": "click", "coordinate": [10, 20]}, id="desktop-click"),
+        pytest.param("computer_use", {"action": "type", "text": "rm -rf build"}, id="desktop-typing"),
+        pytest.param("drive_preview", {"action": "click", "ref": "e4"}, id="preview-click"),
+        pytest.param("ha_call_service", {"domain": "light", "service": "turn_on"}, id="home-assistant"),
+        pytest.param("discord", {"action": "create_thread"}, id="discord-post"),
+        pytest.param("discord_admin", {"action": "delete_message"}, id="discord-admin"),
+        pytest.param("kanban_complete", {"task_id": "k1"}, id="board-work"),
+        pytest.param("image_generate", {"prompt": "a logo"}, id="media"),
+        pytest.param("manage_catalog", {"action": "install"}, id="install"),
+        pytest.param("delegate_task", {"goal": "finish the refactor"}, id="spawn-a-subagent"),
+        pytest.param("delegate_task", {"action": "steer", "subagent_id": "sa1", "message": "keep going"},
+                     id="steer-a-subagent"),
+    ],
+)
+def test_a_stopped_task_blocks_actions_through_the_browser_the_desktop_and_other_tools(tmp_path, monkeypatch,
+                                                                                         tool_name, args):
+    from plugins.cognition_wm import runtime, scope_gate
+
+    turn, task = _turn_with_task(tmp_path, monkeypatch)
+    _stop(task, "cancelled")
+
+    decision = scope_gate.decide(tool_name, args, turn, runtime.settings())
+
+    assert (decision or {}).get("action") == "block"
+
+
+@pytest.mark.parametrize(
+    "tool_name, args",
+    [
+        pytest.param("browser_navigate", {"url": "https://example.com/docs"}, id="open-a-page"),
+        pytest.param("browser_snapshot", {}, id="read-a-page"),
+        pytest.param("browser_console", {}, id="read-the-console"),
+        pytest.param("computer_use", {"action": "capture"}, id="screenshot"),
+        pytest.param("drive_preview", {"action": "elements"}, id="list-preview-elements"),
+        pytest.param("discord", {"action": "fetch_messages"}, id="read-discord"),
+        pytest.param("ha_get_state", {"entity_id": "light.desk"}, id="home-assistant-state"),
+        pytest.param("kanban_show", {"task_id": "k1"}, id="read-the-board"),
+        pytest.param("web_search", {"query": "release notes"}, id="search"),
+        pytest.param("terminal", {"command": "ls -la && git status"}, id="shell-read"),
+        pytest.param("delegate_task", {"action": "list"}, id="list-subagents"),
+        pytest.param("delegate_task", {"action": "stop", "subagent_id": "sa1"}, id="stop-a-subagent"),
+        pytest.param("process_manage", {"action": "kill", "session_id": "p1"}, id="stop-a-job"),
+    ],
+)
+def test_a_stopped_task_leaves_read_only_queries_alone(tmp_path, monkeypatch, tool_name, args):
+    from plugins.cognition_wm import runtime, scope_gate
+
+    turn, task = _turn_with_task(tmp_path, monkeypatch)
+    _stop(task, "paused")
+
+    assert scope_gate.decide(tool_name, args, turn, runtime.settings()) is None
+
+
+_UNTOLD = [
+    pytest.param("terminal", {"command": "python3 refactor.py"}, id="script"),
+    pytest.param("browser_console", {"expression": "fetch('/api/delete', {method: 'POST'})"}, id="page-script"),
+    pytest.param("acme_sync", {"mode": "full"}, id="unknown-plugin-tool"),
+    pytest.param("mcp__srv__delete_repo", {"name": "x"}, id="write-capable-mcp-tool"),
+]
+
+
+def _mcp_server_with(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from tools import mcp_tool
+    from tools import mcp_tool_registration as registration
+    from tools.registry import ToolRegistry
+
+    server = mcp_tool.MCPServerTask("srv")
+    server.session = MagicMock()
+    server._tools = [SimpleNamespace(name=n, description="", inputSchema=None, annotations=SimpleNamespace(readOnlyHint=ro))
+                     for n, ro in (("list_repos", True), ("delete_repo", False))]
+    monkeypatch.setattr("tools.registry.registry", ToolRegistry())
+    registration._register_server_tools("srv", server, {"tools": {"resources": False, "prompts": False}})
+
+
+@pytest.mark.parametrize("tool_name, args", _UNTOLD)
+def test_a_stopped_task_asks_before_a_call_whose_effect_cannot_be_told(tmp_path, monkeypatch, tool_name, args):
+    from plugins.cognition_wm import runtime, scope_gate
+
+    _mcp_server_with(monkeypatch)
+    turn, task = _turn_with_task(tmp_path, monkeypatch)
+    _stop(task, "paused")
+
+    decision = scope_gate.decide(tool_name, args, turn, runtime.settings())
+
+    assert (decision or {}).get("action") == "approve"
+
+
+@pytest.mark.parametrize("tool_name, args", _UNTOLD)
+def test_under_yolo_a_stopped_task_blocks_what_it_cannot_ask_about(tmp_path, monkeypatch, tool_name, args):
+    from plugins.cognition_wm import runtime, scope_gate
+
+    _mcp_server_with(monkeypatch)
+    home = Path(os.environ["HERMES_HOME"])
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text('approvals:\n  mode: "off"\n', encoding="utf-8")
+    turn, task = _turn_with_task(tmp_path, monkeypatch)
+    _stop(task, "cancelled")
+
+    decision = scope_gate.decide(tool_name, args, turn, runtime.settings())
+
+    assert (decision or {}).get("action") == "block"
+
+
+def test_a_read_only_mcp_tool_stays_open_while_a_task_is_stopped(tmp_path, monkeypatch):
+    from plugins.cognition_wm import runtime, scope_gate
+
+    _mcp_server_with(monkeypatch)
+    turn, task = _turn_with_task(tmp_path, monkeypatch)
+    _stop(task, "paused")
+
+    assert scope_gate.decide("mcp__srv__list_repos", {}, turn, runtime.settings()) is None
+
+
 @pytest.mark.parametrize(
     "status, command, action",
     [
-        pytest.param("paused", "python3 refactor.py", "block", id="paused-script"),
-        pytest.param("cancelled", "make build", "block", id="cancelled-build"),
-        pytest.param("paused", "ls -la && git status", None, id="paused-reads"),
         pytest.param("active", "python3 refactor.py", None, id="active-script"),
+        pytest.param("paused", "ls -la && git status", None, id="paused-reads"),
     ],
 )
-def test_a_stopped_task_also_stops_commands_whose_effect_cannot_be_told(tmp_path, monkeypatch, status, command,
-                                                                        action):
-    import plugins.cognition_wm.provenance as provenance
+def test_only_a_stopped_task_gates_commands(tmp_path, monkeypatch, status, command, action):
     from plugins.cognition_wm import runtime, scope_gate
 
     turn, task = _turn_with_task(tmp_path, monkeypatch)
     if status != "active":
-        runtime.store().set_status(task.task_id, status, expected_revision=None, reason="使用者叫停",
-                                   source=provenance.turn_source(owner=True, session_id="s1", turn_id="t0"))
+        _stop(task, status)
 
-    decision = scope_gate.decide("terminal", {"command": command}, turn, runtime.settings())
-
-    assert (decision or {}).get("action") == action
+    assert scope_gate.decide("terminal", {"command": command}, turn, runtime.settings()) is action
 
 
 @pytest.mark.parametrize(

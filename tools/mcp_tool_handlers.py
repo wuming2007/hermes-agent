@@ -56,6 +56,21 @@ def _tool_is_read_only(server_name: str, tool_name: str) -> bool:
     return _core._tool_read_only_hints.get(_resolve_server_key(server_name), {}).get(tool_name) is True
 
 
+def registered_tool_is_read_only(registry_name: str) -> bool:
+    """Whether the MCP tool registered as ``registry_name`` (``mcp__<server>__<tool>``) declared
+    ``readOnlyHint=True`` at discovery. Anything else, or a name no MCP server registered, is
+    write-capable (False), as at the trust gate."""
+    from tools.mcp_tool_schema import mcp_prefixed_tool_name
+    with _core._lock:
+        server_name = _core._mcp_tool_server_names.get(registry_name)
+    if not server_name:
+        return False
+    from tools.mcp_tool_scope import _resolve_server_key
+    hints = _core._tool_read_only_hints.get(_resolve_server_key(server_name), {})
+    return any(read_only is True and mcp_prefixed_tool_name(server_name, tool) == registry_name
+               for tool, read_only in hints.items())
+
+
 def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
     """Approval gate for write-capable tools on ``trust: untrusted`` servers. None to proceed,
     else a ``tool_error``. Fail-closed: approval-system errors block."""

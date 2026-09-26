@@ -332,3 +332,25 @@ class TestAnnotationCaptureAtDiscovery:
         assert _mcp_registration._annotation_read_only_hint(
             SimpleNamespace()
         ) is False
+
+
+def test_a_registered_tool_is_read_only_only_when_it_declared_so():
+    """Other gates (the working-memory scope gate) ask by the tool's registered name."""
+    from tools.mcp_tool_schema import mcp_prefixed_tool_name
+    from tools.registry import ToolRegistry
+
+    def tool(name, annotations):
+        return SimpleNamespace(name=name, description="", inputSchema=None, annotations=annotations)
+
+    server = mcp_tool.MCPServerTask("srv")
+    server.session = MagicMock()
+    server._tools = [tool("list_repos", SimpleNamespace(readOnlyHint=True)),
+                     tool("delete_repo", SimpleNamespace(readOnlyHint=False)), tool("no_annotations", None)]
+    with patch("tools.registry.registry", ToolRegistry()), \
+         patch.dict(mcp_tool._mcp_tool_server_names, {}, clear=True):
+        _mcp_registration._register_server_tools("srv", server, {"tools": {"resources": False, "prompts": False}})
+
+        assert _mcp_handlers.registered_tool_is_read_only(mcp_prefixed_tool_name("srv", "list_repos")) is True
+        assert _mcp_handlers.registered_tool_is_read_only(mcp_prefixed_tool_name("srv", "delete_repo")) is False
+        assert _mcp_handlers.registered_tool_is_read_only(mcp_prefixed_tool_name("srv", "no_annotations")) is False
+        assert _mcp_handlers.registered_tool_is_read_only("mcp__srv__never_registered") is False

@@ -41,9 +41,13 @@ output cannot.
 
 ## What it enforces
 
-- A paused or cancelled task stays stopped: execution tools (writes, repo-changing git, coding
-  agents, deploys and restarts, migrations, messages) are blocked, also under `/yolo`. So is a
-  shell command whose effect cannot be told from the command, such as `python3 refactor.py`.
+- A paused or cancelled task stays stopped: calls that act are blocked, also under `/yolo` —
+  writes, repo-changing git, coding agents, deploys and restarts, migrations, messages, clicks
+  and keystrokes in a browser or on the desktop, Home Assistant services, board work and paid
+  generation. A call whose effect cannot be told (a script such as `python3 refactor.py`, page
+  script, an unknown plugin tool, an MCP tool not declared read-only) needs your confirmation,
+  and is blocked under `/yolo`. Reading stays open: pages, screenshots, status, searches, and
+  listing or stopping jobs and subagents.
 - A limit the user just gave ("only the prompt, don't change the repo") sends execution tools to
   the approval prompt until the model records it.
 - A permission the user gave in an earlier session must be confirmed again. While the user forbids
@@ -84,5 +88,4 @@ deleting that file removes it completely.
 - Command reading is heuristic and never runs anything: code imported by a one-liner, or a command
   deliberately disguised (built from pieces at run time), can slip past it; the approval rules
   still apply to such calls.
-- Only the execution tools named above, shell commands and `execute_code` are gated; tools that
-  act on the desktop or in a browser are not.
+- Opening a web page counts as reading; a page whose mere visit changes something is not caught.
