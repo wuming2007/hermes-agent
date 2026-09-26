@@ -152,9 +152,9 @@ def evidence_note(agent: Any, answer: str, messages: Sequence[Any]) -> str:
     if not claims:
         return ""
     if _CJK.search(answer):
-        listed = "\n".join(f"- {claim_excerpt(c, 120)}（{REASON_TEXT[c.reason][1]}）" for c in claims)
+        listed = "\n".join(dict.fromkeys(f"- {claim_excerpt(c, 120)}（{REASON_TEXT[c.reason][1]}）" for c in claims))
         return f"\n\n---\n證據狀態：以下說法本輪沒有工具結果佐證，請視為未證實：\n{listed}"
-    listed = "\n".join(f"- {claim_excerpt(c, 120)} ({REASON_TEXT[c.reason][0]})" for c in claims)
+    listed = "\n".join(dict.fromkeys(f"- {claim_excerpt(c, 120)} ({REASON_TEXT[c.reason][0]})" for c in claims))
     return f"\n\n---\nEvidence status: this turn's tool results do not show the following, so treat them as unverified:\n{listed}"
 
 

@@ -239,22 +239,47 @@ def classify_tool_result(tool_name: str, args: Any, result: Any, tool_call_id: s
     return _classify(str(tool_call_id or ""), name, arguments, _content_text(result), index=0)
 
 
-# A background job's exit arrives as a user-role notice (tools/process_registry_notifications.py).
-_NOTICE = re.compile(
+# Background work reports back in user-role notices (tools/process_registry_notifications.py): a
+# background job's exit, and an async subagent's result (top-level delegations always run async).
+_JOB_NOTICE = re.compile(
     r"\A\[IMPORTANT: Background process (?P<sid>\S+) [^\n]*?\(exit code (?P<exit>-?\d+)[^)\n]*\)\.\n"
     r"(?:[^\n]*\n)??Command: (?P<cmd>[^\n]*)")
+_DELEGATION_NOTICE = re.compile(r"\A\[ASYNC DELEGATION (?:BATCH )?COMPLETE — (?P<sid>[^\]\s]+)\]")
+_NOTICE_GOAL = re.compile(r"^Original goal: (?P<goal>.*)$", re.MULTILINE)
+_NOTICE_STATUS = re.compile(r"^Status: (?P<status>\w+)", re.MULTILINE)
 
 
-def _notice_item(text: str, index: int) -> EvidenceItem | None:
-    match = _NOTICE.match(text)
-    if match is None:
-        return None
+def _job_notice(match: re.Match, text: str, index: int) -> EvidenceItem:
     command = match["cmd"].strip()
     return EvidenceItem(
         evidence_id=f"e_notice_{match['sid']}_{index}", tool_name="process_notice", kind=command_kind(command),
         status={0: "ok", 124: "timeout"}.get(int(match["exit"]), "error"), target=command, provenance="self",
         index=index, kinds=_command_kinds(command), text=text,
     )
+
+
+def _delegation_notice(match: re.Match, text: str, index: int) -> EvidenceItem:
+    states = {_SUBAGENT_STATUSES.get(m["status"], "error") for m in _NOTICE_STATUS.finditer(text)} or {"error"}
+    goal = _NOTICE_GOAL.search(text)
+    return EvidenceItem(
+        evidence_id=f"e_delegation_{match['sid']}_{index}", tool_name="delegation_notice", kind="delegate_report",
+        status=states.pop() if len(states) == 1 else "partial", target=goal["goal"].strip() if goal else "",
+        provenance="subagent", index=index, kinds=frozenset({"delegate_report"}), text=text,
+    )
+
+
+_NOTICES: tuple[tuple[re.Pattern, Callable[[re.Match, str, int], EvidenceItem]], ...] = (
+    (_JOB_NOTICE, _job_notice),
+    (_DELEGATION_NOTICE, _delegation_notice),
+)
+
+
+def _notice_item(text: str, index: int) -> EvidenceItem | None:
+    for pattern, build in _NOTICES:
+        match = pattern.match(text)
+        if match is not None:
+            return build(match, text, index)
+    return None
 
 
 def _is_turn_start(message: Any) -> bool:

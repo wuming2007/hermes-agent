@@ -263,3 +263,19 @@ def test_evidence_from_an_earlier_turn_does_not_count():
 
 def test_every_claim_class_has_a_support_rule():
     assert set(CLAIM_CLASSES) == set(SUPPORT)
+
+
+@pytest.mark.parametrize("status, reason", [("completed", "only_subagent_report"), ("failed", "failed")])
+def test_an_async_subagent_result_is_a_subagent_report(status, reason):
+    from tools.process_registry_notifications import format_process_notification
+
+    notice = format_process_notification({"type": "async_delegation", "delegation_id": "deleg_1",
+                                          "goal": "Fix the parser and run the tests", "status": status,
+                                          "summary": "Fixed it; all tests pass.", "api_calls": 3})
+    messages = [{"role": "user", "content": "fix the parser"}, {"role": "assistant", "content": "dispatched"},
+                {"role": "user", "content": notice}]
+
+    report = build_evidence_report("所有測試都通過了。", messages)
+
+    assert (report.evidence[-1].kind, report.evidence[-1].provenance) == ("delegate_report", "subagent")
+    assert [(c.claim_class, c.reason) for c in report.unsupported] == [("tests_pass", reason)]
