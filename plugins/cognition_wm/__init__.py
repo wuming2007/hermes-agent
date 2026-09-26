@@ -8,7 +8,7 @@ only gains a fixed usage note at session start, so the prompt cache prefix never
 
 from __future__ import annotations
 
-from plugins.cognition_wm import evidence_link, tool, turn
+from plugins.cognition_wm import evidence_link, scope_gate, tool, turn
 
 USAGE = (
     "Working memory: Hermes keeps the state of the user's work — tasks, decisions, limits, "
@@ -23,6 +23,7 @@ USAGE = (
 def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", turn.on_pre_llm_call)
     ctx.register_hook("post_tool_call", evidence_link.on_post_tool_call)
+    ctx.register_hook("pre_tool_call", scope_gate.on_pre_tool_call)
     ctx.register_tool(name="task_state", toolset="cognition_wm", schema=tool.SCHEMA, handler=tool.handle,
                       description=tool.SCHEMA["description"], emoji="🧭")
     ctx.register_system_prompt_section("cognition-wm", USAGE, position="after_memory", max_chars=len(USAGE) + 100)

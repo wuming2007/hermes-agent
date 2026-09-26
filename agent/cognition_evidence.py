@@ -106,7 +106,8 @@ _PROCESS_REPORT_ACTIONS = frozenset({"poll", "wait", "log"})
 _PROCESS_ACTION_KINDS = {"list": "read"}
 
 
-def _command_kind(command: str) -> str:
+def command_kind(command: str) -> str:
+    """What a shell command does, by its first matching step kind (exec when nothing matches)."""
     command = _LEADING_CD.sub("", command or "")
     return next((kind for kind, pattern in _COMMAND_KINDS if pattern.search(command)), "exec")
 
@@ -123,7 +124,7 @@ def command_changes_state(command: str) -> bool:
 def _command_kinds(command: str) -> frozenset:
     """The kind of the whole command plus the kind of each chained step."""
     steps = [step for step in _CHAIN.split(_LEADING_CD.sub("", command or "")) if step]
-    return frozenset({_command_kind(command), *(_command_kind(step) for step in steps)})
+    return frozenset({command_kind(command), *(command_kind(step) for step in steps)})
 
 
 def _error_text(data: dict, raw: str) -> str:
@@ -209,7 +210,7 @@ def _kinds(name: str, args: dict, data: dict, command: str) -> tuple[str, frozen
     if name == "process_manage" and not report:
         kind = _PROCESS_ACTION_KINDS.get(str(args.get("action")), "exec")
     elif command and (name == "terminal" or report):
-        return _command_kind(command), _command_kinds(command)
+        return command_kind(command), _command_kinds(command)
     else:
         kind = _TOOL_KINDS.get(name, "exec")
     return kind, frozenset({kind})
@@ -250,7 +251,7 @@ def _notice_item(text: str, index: int) -> EvidenceItem | None:
         return None
     command = match["cmd"].strip()
     return EvidenceItem(
-        evidence_id=f"e_notice_{match['sid']}_{index}", tool_name="process_notice", kind=_command_kind(command),
+        evidence_id=f"e_notice_{match['sid']}_{index}", tool_name="process_notice", kind=command_kind(command),
         status={0: "ok", 124: "timeout"}.get(int(match["exit"]), "error"), target=command, provenance="self",
         index=index, kinds=_command_kinds(command), text=text,
     )
