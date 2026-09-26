@@ -700,6 +700,31 @@ DEFAULT_CONFIG = {
             "trace": "disabled",         # "enabled" | "disabled" | "enabled_full"
         },
     },
+
+    # Per-turn cognitive routing scaffold (PR1).
+    # Disabled by default; when enabled, classifies each turn into
+    # fast/standard/deep and surfaces routing metadata for downstream
+    # layers (verification ladder, layered retrieval, consistency guard).
+    "cognition": {
+        "enabled": False,
+        "fast_mode": {
+            "max_chars": 160,
+            "max_words": 28,
+            "allow_urls": False,
+            "allow_code_blocks": False,
+        },
+        "deep_mode_triggers": {
+            "historical_questions": True,
+            "code_changes": True,
+            "risky_external_actions": True,
+            "architecture_decisions": True,
+        },
+        "consistency_guard": {
+            "enabled": True,
+            "deep_mode_only": True,
+        },
+    },
+
     # Auxiliary model config — provider/model per side task. provider "auto" = auto-detect;
     # empty model = provider's default aux model; all tasks fall back to
     # openrouter:google/gemini-3-flash-preview when the configured provider is unavailable.

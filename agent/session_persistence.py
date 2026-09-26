@@ -441,7 +441,13 @@ class SessionPersistenceMixin:
         if not self.save_trajectories:
             return
         trajectory = self._convert_to_trajectory_format(messages, user_query, completed)
-        _save_trajectory_to_file(trajectory, self.model, completed)
+        # PR8: carry the turn's cognition trace as entry metadata (omitted when absent).
+        metadata = None
+        if isinstance(getattr(self, "_current_turn_cognition_metadata", None), dict):
+            cognition_trace = self._current_turn_cognition_metadata.get("cognition_trace")
+            if cognition_trace is not None:
+                metadata = {"cognition_trace": cognition_trace}
+        _save_trajectory_to_file(trajectory, self.model, completed, metadata=metadata)
 
     _extract_api_error_context = _forward_static("agent.agent_runtime_helpers", "extract_api_error_context")
     _dump_api_request_debug = _forward("agent.agent_runtime_helpers", "dump_api_request_debug")

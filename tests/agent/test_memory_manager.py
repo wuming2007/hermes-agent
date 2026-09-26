@@ -121,6 +121,14 @@ class TestProviderLayeredHookDefault:
         provider.prefetch_layered("q", layers=("principles",), session_id="abc")
         assert provider.prefetch_calls[0][1] == "abc"
 
+    def test_default_metadata_and_policy_hooks_are_noop(self):
+        # Moved from upstream's TestMemoryProviderABC no-op test, which
+        # v0.21.5 purged (19f76d7498): the PR14/PR15 hooks leave existing
+        # providers unchanged by default.
+        provider = _LegacyOnlyProvider()
+        assert provider.describe_memory_object_metadata() == {}
+        assert provider.prefetch_policy_items("send email") == []
+
 
 # ---------------------------------------------------------------------------
 # Task 3: MemoryManager.prefetch_for_policy orchestration
