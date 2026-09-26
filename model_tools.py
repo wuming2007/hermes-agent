@@ -11,7 +11,7 @@ import json
 import re
 import asyncio
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from contextvars import ContextVar
 import logging
 import threading
@@ -657,6 +657,16 @@ class _CallIds:
         """Same fields with None -> "" (hook/middleware wire contract)."""
         return {k: v or "" for k, v in asdict(self).items()}
 
+    def within_enclosing_call(self) -> "_CallIds":
+        """A call made from inside another tool (execute_code's RPC) names no session or turn: it
+        belongs to the tool call running it, whose identity is bound for that call's duration, so
+        hooks and approvals see the real session instead of an anonymous one."""
+        if self.session_id or self.turn_id:
+            return self
+        from tools.approval_context import get_current_call_identity
+        session_id, turn_id = get_current_call_identity()
+        return replace(self, session_id=session_id or None, turn_id=turn_id or None)
+
 
 def _tool_result_observer_fields(tool_name: str, result: Any) -> tuple[str, Optional[str], Optional[str]]:
     """Derive (status, error_type, error_message) from a tool result for observer hooks."""
@@ -890,7 +900,7 @@ def handle_function_call(
         function_args = {}
     trace = list(tool_request_middleware_trace or [])
     function_name = _LEGACY_TOOL_ALIASES.get(function_name, function_name)
-    ids = _CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id)
+    ids = _CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id).within_enclosing_call()
     start = time.monotonic()
 
     def _emit(result: Any, **extra: Any) -> Any:

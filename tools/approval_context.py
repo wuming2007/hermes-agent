@@ -99,6 +99,11 @@ def reset_current_observability_context(tokens: _Tokens) -> None:
     _approval_turn_id.reset(turn_token)
 
 
+def get_current_call_identity() -> tuple[str, str]:
+    """(session id, turn id) of the tool call running in this context; empty strings outside one."""
+    return _approval_session_id.get(), _approval_turn_id.get()
+
+
 def get_current_session_key(default: str = "default") -> str:
     """Return the active session key: approval contextvar → session_context → os.environ."""
     if session_key := _approval_session_key.get():
