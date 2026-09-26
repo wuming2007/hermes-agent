@@ -25,13 +25,13 @@ no chained reasoning, no multi-step repair pipelines.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Optional, Tuple
 
 from agent.cognitive_router import CognitiveRoute
+from utils import safe_json_loads
 
 logger = logging.getLogger(__name__)
 
@@ -220,13 +220,23 @@ def _build_verification_prompt(
     *,
     candidate_response: str,
     user_message: str,
+    evidence: str = "",
 ) -> str:
     """Build a compact verifier prompt.
 
     Kept short on purpose: the verifier must run cheaply enough not to
     bloat ``deep`` mode latency. The prompt asks for a structured JSON
-    response so callers can parse it deterministically.
+    response so callers can parse it deterministically. ``evidence`` is the
+    turn's tool results as the assistant saw them: without it the verifier
+    cannot tell a fact read off a tool result from an invented one, and
+    rewrites grounded answers as unverifiable.
     """
+    evidence_block = (
+        "Tool evidence from this turn (what the assistant actually ran and saw). Facts shown here "
+        "are grounded: do not revise them for lacking a source. Revise only what contradicts this "
+        "evidence or claims a state it does not show, and say that part is unverified instead of "
+        f"inventing a result.\n{evidence}\n\n"
+    ) if evidence else ""
     return (
         "You are a strict consistency verifier. Compare the candidate "
         "assistant response against the user's request. If the candidate "
@@ -234,21 +244,30 @@ def _build_verification_prompt(
         "concrete factual / logical / completeness problem, reply with JSON "
         "{\"verdict\":\"revise\",\"issues\":[...],\"revised_response\":\"...\"}.\n\n"
         f"User request:\n{user_message}\n\n"
+        f"{evidence_block}"
         f"Candidate response:\n{candidate_response}\n\n"
         "Reply with JSON only."
     )
 
 
+_FENCED_JSON = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+
+
 def _coerce_verifier_payload(payload: Any) -> Optional[dict]:
-    """Best-effort normalize verifier output into a dict, or return None."""
+    """Best-effort normalize verifier output into a dict, or return None.
+
+    Models asked for "JSON only" still wrap it in a code fence or a lead-in
+    sentence; reading only bare JSON turned every such verdict into a parse
+    failure that silently kept the candidate."""
     if isinstance(payload, dict):
         return payload
-    if isinstance(payload, str):
-        # Some auxiliary clients return raw JSON-ish strings; try to parse.
-        try:
-            parsed = json.loads(payload)
-        except (TypeError, ValueError):
-            return None
+    if not isinstance(payload, str):
+        return None
+    text = payload.strip()
+    fenced = _FENCED_JSON.search(text)
+    start, end = text.find("{"), text.rfind("}")
+    for candidate in (text, fenced.group(1) if fenced else "", text[start:end + 1] if 0 <= start < end else ""):
+        parsed = safe_json_loads(candidate)
         if isinstance(parsed, dict):
             return parsed
     return None
@@ -259,6 +278,7 @@ def run_full_consistency_check(
     candidate_response: str,
     user_message: str,
     verifier: VerifierCallable,
+    evidence: str = "",
 ) -> VerificationResult:
     """Full guard — runs one verifier call that may rewrite the response.
 
@@ -284,7 +304,7 @@ def run_full_consistency_check(
         )
 
     prompt = _build_verification_prompt(
-        candidate_response=candidate, user_message=user_message
+        candidate_response=candidate, user_message=user_message, evidence=evidence
     )
 
     try:

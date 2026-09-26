@@ -265,6 +265,7 @@ def build_process_monitor_metadata(report: ProcessMonitorReport | None) -> dict[
             "process_monitor_claim_kinds": [],
             "process_monitor_unsupported_claims": [],
             "process_monitor_policy_gap_claims": [],
+            "process_monitor_claims": [],
         }
     unsupported = [item.claim.text for item in report.assessments if not item.supported]
     policy_gaps = [item.claim.text for item in report.assessments if item.policy_gap]
@@ -277,6 +278,12 @@ def build_process_monitor_metadata(report: ProcessMonitorReport | None) -> dict[
         "process_monitor_claim_kinds": [claim.kind for claim in report.claims],
         "process_monitor_unsupported_claims": unsupported,
         "process_monitor_policy_gap_claims": policy_gaps,
+        # Per claim, the evidence it was judged on: a gap names no refs.
+        "process_monitor_claims": [
+            {"text": item.claim.text, "kind": item.claim.kind, "supported": item.supported,
+             "evidence_refs": list(item.evidence_refs)}
+            for item in report.assessments
+        ],
     }
 
 

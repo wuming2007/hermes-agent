@@ -312,7 +312,7 @@ def finish_text_response(
     if not getattr(agent, "_interrupt_requested", False):
         _guarded = apply_cognition_consistency_guard(
             agent, final_response, turn_id=getattr(agent, "_current_turn_id", "") or "",
-            user_message=original_user_message, logger=logger,
+            user_message=original_user_message, logger=logger, evidence_messages=messages,
         )
         if _guarded != final_response:
             final_response = _guarded

@@ -231,8 +231,9 @@ def build_autonomy_telemetry_from_metadata(metadata: Mapping[str, Any] | None) -
         requested_action=action_text,
         external_action=explicit_external,
         user_approval_present=_as_bool(meta.get("autonomy_user_approval_present")),
-        tool_evidence_present=_as_bool(meta.get("tool_evidence_present"))
-        or bool(meta.get("verification_notes")),
+        # Guard notes are the verifier's findings, not evidence: a note saying a claim is
+        # unsupported must not count as support for it.
+        tool_evidence_present=_as_bool(meta.get("tool_evidence_present")),
         policy_support_present=bool(meta.get("policy_memory_citations")),
         process_evidence_gap_count=_as_int(meta.get("process_monitor_evidence_gap_count")),
         process_policy_gap_count=_as_int(meta.get("process_monitor_policy_gap_count")),

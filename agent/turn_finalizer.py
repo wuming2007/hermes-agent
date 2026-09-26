@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any, Callable, List, Optional, Tuple
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
@@ -22,6 +23,12 @@ from agent.served_model import result_model_fields
 from agent.autonomy_telemetry import (
     build_autonomy_metadata,
     build_autonomy_telemetry_from_metadata,
+)
+from agent.cognition_evidence import (
+    build_evidence_report,
+    evidence_for_verifier,
+    evidence_metadata,
+    evidence_refs_for,
 )
 from agent.cognition_trace import build_cognition_turn_trace
 from agent.consistency_guard import (
@@ -217,7 +224,9 @@ def _rollback_interrupted_preflight_display(agent, interrupted) -> None:
             _rollback_fn(_preflight_snapshot)
 
 
-def apply_cognition_consistency_guard(agent, final_response, *, turn_id, user_message, logger, messages=None):
+def apply_cognition_consistency_guard(
+    agent, final_response, *, turn_id, user_message, logger, messages=None, evidence_messages=None,
+):
     """PR6 verification-ladder metadata + PR3 consistency guard, at most once per turn.
 
     Runs where the answer is about to become durable: ``finish_text_response`` calls it
@@ -227,8 +236,10 @@ def apply_cognition_consistency_guard(agent, final_response, *, turn_id, user_me
     Only runs when the cognitive router asked for verification; never touches the system
     prompt and is fully non-fatal — any exception keeps the candidate response. With
     ``messages``, a revision is mirrored into the transcript tail when that row carries the
-    answer, so persistence, plugin hooks and the caller all see the revised text. Returns
-    the (possibly revised) response."""
+    answer, so persistence, plugin hooks and the caller all see the revised text. The full
+    verifier also sees the tool evidence of the turn in ``evidence_messages``, so it judges
+    facts read off a tool result against that result instead of rewriting them as
+    unverifiable. Returns the (possibly revised) response."""
     route = getattr(agent, "_current_cognitive_route", None)
     if not final_response or route is None:
         return final_response
@@ -266,10 +277,12 @@ def apply_cognition_consistency_guard(agent, final_response, *, turn_id, user_me
                 user_message=_user_msg_for_guard,
             )
         elif _plan == "full":
+            _evidence = evidence_for_verifier(final_response, evidence_messages) if evidence_messages else ""
             _guard_result = run_full_consistency_check(
                 candidate_response=final_response,
                 user_message=_user_msg_for_guard,
                 verifier=agent._default_consistency_verifier,
+                evidence=_evidence,
             )
         else:
             _guard_result = None
@@ -300,7 +313,7 @@ def apply_cognition_consistency_guard(agent, final_response, *, turn_id, user_me
     return final_response
 
 
-def _record_cognition_observers(agent, final_response, interrupted, logger):
+def _record_cognition_observers(agent, final_response, interrupted, logger, messages=None):
     """Post-guard cognition observers; returns the PR7 nested trace (``None`` on failure).
 
     Observation only: they record evidence / telemetry for the settled response and must
@@ -311,21 +324,22 @@ def _record_cognition_observers(agent, final_response, interrupted, logger):
     # ── Process monitor / claimwise verification (PR16) ──────────────
     # Observational only: it records evidence/policy gaps for the final
     # post-guard response. It must never rewrite or block the response.
+    # Each claim cites the tool results that bear on it; the guard's notes
+    # are findings, not evidence, so they no longer count as support.
     if final_response and not interrupted and route is not None:
         try:
             _policy_refs = []
-            _verification_notes = []
             if isinstance(meta, dict):
                 _policy_refs = list(meta.get("policy_memory_citations") or [])
-                _verification_notes = list(meta.get("verification_notes") or [])
-            _claims = extract_claims_from_response(final_response)
-            _process_report = assess_claims(
-                _claims,
-                policy_refs=_policy_refs,
-                verification_notes=_verification_notes,
-            )
+            _evidence = build_evidence_report(final_response, messages or [])
+            _claims = [
+                replace(claim, evidence_refs=evidence_refs_for(claim.text, _evidence.evidence))
+                for claim in extract_claims_from_response(final_response)
+            ]
+            _process_report = assess_claims(_claims, policy_refs=_policy_refs)
             if isinstance(meta, dict):
                 meta.update(build_process_monitor_metadata(_process_report))
+                meta.update(evidence_metadata(_evidence))
         except Exception as exc:
             logger.warning("process_monitor raised (non-fatal): %s", exc)
 
@@ -708,8 +722,9 @@ def finalize_turn(
             # writes it and re-arms the blank row the stream may have flushed. Pre-filling
             # that row here would leave it marked as stored while SQLite still holds blank.
             messages=None if _recovered_from_stream else messages,
+            evidence_messages=messages,
         )
-    _cognition_trace = _record_cognition_observers(agent, final_response, interrupted, logger)
+    _cognition_trace = _record_cognition_observers(agent, final_response, interrupted, logger, messages=messages)
 
     # The model has answered (or the loop gave up): a title upgrade held back because it shares a
     # self-hosted endpoint with the main request (#117296) may go out now.
