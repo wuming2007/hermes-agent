@@ -234,3 +234,13 @@ def test_a_blocked_command_did_not_run():
             {"role": "tool", "tool_call_id": "b", "content": "3 passed"}]
 
     assert runner._ran(rows) == ["sh run_tests.sh"]
+
+
+def test_the_run_uses_the_eval_homes_own_model_and_provider(tmp_path, monkeypatch):
+    """Like `hermes chat -q`: the configured provider, model and API mode, never an unresolved
+    default (an unresolved agent sent chat completions to the Codex backend and got 404s)."""
+    rows = _run_scripted(tmp_path, monkeypatch, {"id": "chat", "set": "dev", "turns": ["今天適合出門嗎？"]},
+                         lambda _r: Text("今天天氣不錯。"), ["off"])
+
+    (row,) = [r for r in rows if r["kind"] == "turn"]
+    assert (row["model"], row["provider"]) == ("fake-model", "custom")

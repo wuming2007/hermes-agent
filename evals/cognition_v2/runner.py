@@ -182,6 +182,23 @@ def _sessions(case: dict) -> list[dict]:
              "compact_before_turn": case.get("compact_before_turn")}]
 
 
+def _runtime_kwargs() -> dict:
+    """The provider, model, API mode and credentials this home's config selects, resolved the way
+    ``hermes chat -q`` does; without it an agent falls back to an unresolved default."""
+    from hermes_cli.config import load_config
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from hermes_constants import resolve_reasoning_config
+
+    cfg = load_config()
+    model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+    model = str(model_cfg.get("default") or model_cfg.get("model") or "")
+    runtime = resolve_runtime_provider(requested=model_cfg.get("provider") or None, target_model=model or None)
+    return {"api_key": runtime.get("api_key"), "base_url": runtime.get("base_url"), "provider": runtime.get("provider"),
+            "requested_provider": runtime.get("requested_provider"), "api_mode": runtime.get("api_mode"),
+            "model": model, "credential_pool": runtime.get("credential_pool"),
+            "reasoning_config": resolve_reasoning_config(cfg, model)}
+
+
 def _learning_store():
     from plugins.cognition_wm.experience_store import ExperienceStore
 
@@ -237,6 +254,7 @@ def _run_case(case: dict, arm_name: str, repeat: int, work_root: Path, home: Pat
     _start_clean()
     _seed_outcomes(case, home)
     db = SessionDB()
+    runtime = _runtime_kwargs()
     stamp = int(time.time() * 1000)
     for s_index, session in enumerate(_sessions(case)):
         work = root / session["project"] if session.get("project") else root
@@ -248,9 +266,9 @@ def _run_case(case: dict, arm_name: str, repeat: int, work_root: Path, home: Pat
             _write_files(work, (session.get("files_before_turn") or {}).get(str(index)))  # the world changes
             if session.get("compact_before_turn") == index:
                 _compress(AIAgent(session_db=db, session_id=session_id, quiet_mode=True, platform="cli",
-                                  enabled_toolsets=TOOLSETS), db, session_id)
+                                  enabled_toolsets=TOOLSETS, **runtime), db, session_id)
             agent = AIAgent(session_db=db, session_id=session_id, quiet_mode=True, platform="cli",
-                            enabled_toolsets=TOOLSETS)
+                            enabled_toolsets=TOOLSETS, **runtime)
             started = time.monotonic()
             result = agent.run_conversation(message, conversation_history=db.get_messages_as_conversation(session_id))
             wall = time.monotonic() - started
