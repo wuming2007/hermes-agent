@@ -167,3 +167,13 @@ def test_context_builder_renders_compact_summary():
     assert "Autonomy Telemetry" in context
     assert "level=blocked_pending_evidence" in context
     assert "external_action=True" in context
+
+
+def test_a_track_record_replaces_the_self_assessment_even_when_it_knows_nothing():
+    """Competence comes from recorded results when a track record is kept; too few results means
+    unknown, never the turn's own confidence guess. Without a track record nothing changes."""
+    guessed = {"uncertainty_confidence_band": "high"}
+
+    assert build_autonomy_telemetry_from_metadata({**guessed, "track_record_band": "unknown"}).competence_band == "unknown"
+    assert build_autonomy_telemetry_from_metadata({**guessed, "track_record_band": "low"}).competence_band == "low"
+    assert build_autonomy_telemetry_from_metadata(guessed).competence_band == "high"

@@ -751,8 +751,10 @@ def _collect_pre_llm_call_context(
     (never the system prompt). Oversized per-hook context is spilled to disk so a
     runaway plugin can't inflate every subsequent turn's prompt. A hook may also return
     ``verifier_context``: reference for this turn's answer check only, never sent to the model
-    (``agent._turn_verifier_context``)."""
+    (``agent._turn_verifier_context``); and ``turn_guidance``, which may raise this turn's answer
+    check (``agent._turn_guidance``, read by the cognitive route)."""
     agent._turn_verifier_context = ""
+    agent._turn_guidance = {}
     if getattr(agent, "_persist_disabled", False):
         return ""
     try:
@@ -766,6 +768,7 @@ def _collect_pre_llm_call_context(
             conversation_history=list(messages),
             is_first_turn=(not bool(conversation_history)),
             model=agent.model,
+            provider=getattr(agent, "provider", None) or "",
             platform=getattr(agent, "platform", None) or "",
             parent_session_id=getattr(agent, "_parent_session_id", None) or "",
             sender_id=getattr(agent, "_user_id", None) or "",
@@ -783,6 +786,8 @@ def _collect_pre_llm_call_context(
         _ctx_parts: list[str] = []
         agent._turn_verifier_context = "\n\n".join(
             str(r["verifier_context"]) for r in _pre_results if isinstance(r, dict) and r.get("verifier_context"))
+        from agent.cognition_routing import merge_turn_guidance
+        agent._turn_guidance = merge_turn_guidance(r.get("turn_guidance") for r in _pre_results if isinstance(r, dict))
         for r in _pre_results:
             if isinstance(r, dict) and r.get("context"):
                 _piece = str(r["context"])

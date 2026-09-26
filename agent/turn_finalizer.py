@@ -647,6 +647,7 @@ def _apply_output_hooks(
             assistant_response=final_response,
             conversation_history=list(messages),
             model=agent.model,
+            provider=getattr(agent, "provider", None) or "",
             platform=platform,
         )
     return final_response, transformed, pre_transform

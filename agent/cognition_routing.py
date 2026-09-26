@@ -5,9 +5,43 @@ PR3 full consistency guard. Both are called by the turn phases (``agent.turn_con
 ``agent.turn_finalizer``); with cognition disabled the route stays ``None``."""
 
 import logging
-from typing import Any, Dict, List
+from dataclasses import replace
+from typing import Any, Dict, Iterable, List
 
 logger = logging.getLogger("run_agent")  # origin module's name: log records / caplog filters unchanged
+
+_PLAN_RANK = {"none": 0, "light": 1, "full": 2}
+_BAND_RANK = {"low": 0, "medium": 1, "high": 2, "unknown": 3}
+
+
+def merge_turn_guidance(pieces: Iterable[Any]) -> Dict[str, Any]:
+    """One turn's ``turn_guidance`` from every ``pre_llm_call`` hook that gave some: the strictest
+    answer check and the most cautious track-record band win."""
+    merged: Dict[str, Any] = {}
+    reasons: List[str] = []
+    for piece in pieces:
+        if not isinstance(piece, dict):
+            continue
+        floor = piece.get("verification_floor")
+        if floor in _PLAN_RANK and _PLAN_RANK[floor] > _PLAN_RANK.get(merged.get("verification_floor"), -1):
+            merged["verification_floor"] = floor
+        band = piece.get("track_record_band")
+        if band in _BAND_RANK and _BAND_RANK[band] < _BAND_RANK.get(merged.get("track_record_band"), len(_BAND_RANK)):
+            merged["track_record_band"] = band
+        reasons += [str(reason) for reason in piece.get("reasons") or () if reason]
+    if reasons:
+        merged["reasons"] = list(dict.fromkeys(reasons))
+    return merged
+
+
+def apply_verification_floor(route: Any, guidance: Dict[str, Any]) -> Any:
+    """The route with its answer check raised to the guidance's floor. Only ever raised, and only the
+    check: the mode, what is recalled and which model may answer stay as the router chose."""
+    floor = (guidance or {}).get("verification_floor")
+    if floor not in _PLAN_RANK or _PLAN_RANK[floor] <= _PLAN_RANK.get(route.verification_plan, 0):
+        return route
+    reasons = [f"track_record:{reason}" for reason in guidance.get("reasons") or ("floor",)]
+    return replace(route, verification_plan=floor, routing_reasons=[*route.routing_reasons, *reasons])
 
 
 class CognitionRoutingMixin:
@@ -98,6 +132,12 @@ class CognitionRoutingMixin:
                 logger.warning("uncertainty_policy failed; keeping cognitive route: %s", e)
                 uncertainty_decision = None
 
+        # A plugin's record of how this kind of work went (``pre_llm_call`` → ``turn_guidance``) may
+        # raise the answer check for this turn; the router's own reading of the message stands.
+        guidance = getattr(self, "_turn_guidance", None) or {}
+        if route is not None:
+            route = apply_verification_floor(route, guidance)
+
         self._current_cognitive_route = route
         if route is None:
             self._current_turn_cognition_metadata = {"mode": "disabled"}
@@ -118,6 +158,8 @@ class CognitionRoutingMixin:
                 "answer_density": route.answer_density,
                 "stance_reasons": list(route.stance_reasons),
             }
+            if "track_record_band" in guidance:
+                self._current_turn_cognition_metadata["track_record_band"] = guidance["track_record_band"]
             if uncertainty_decision is not None:
                 self._current_turn_cognition_metadata.update({
                     "original_mode": original_mode,

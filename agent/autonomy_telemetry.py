@@ -239,7 +239,11 @@ def build_autonomy_telemetry_from_metadata(metadata: Mapping[str, Any] | None) -
         process_policy_gap_count=_as_int(meta.get("process_monitor_policy_gap_count")),
         plasticity_promoted_count=_as_int(meta.get("plasticity_promoted_count")),
         plasticity_decayed_count=_as_int(meta.get("plasticity_decayed_count")),
-        competence_band=_bounded_str(meta.get("uncertainty_confidence_band"), _COMPETENCE_BANDS, "unknown"),
+        # Recorded results beat the turn's guess at its own confidence: with a track record kept,
+        # too few results reads as unknown rather than falling back to the guess.
+        competence_band=_bounded_str(
+            meta["track_record_band"] if "track_record_band" in meta else meta.get("uncertainty_confidence_band"),
+            _COMPETENCE_BANDS, "unknown"),
         risk_level=_bounded_str(meta.get("autonomy_risk_level_hint"), _RISK_LEVELS, "low"),
     )
     return resolve_autonomy_telemetry(signal, metadata=meta)
