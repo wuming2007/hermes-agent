@@ -88,6 +88,14 @@ WEB_PARTIAL = ("web_extract", {"urls": ["https://example.com/a", "https://exampl
         pytest.param(PROC_DONE, "deploy", "ok", "self", id="waited-background-job"),
         pytest.param(WEB_PARTIAL, "network", "partial", "self", id="some-urls-failed"),
         pytest.param(BG_FAILED, "background_spawn", "error", "self", id="spawn-that-never-started"),
+        pytest.param(("terminal", {"command": "touch /tmp/pytest-of-ci/flag"}, {"output": "", "exit_code": 0, "error": None}),
+                     "write", "ok", "self", id="path-named-like-a-test-runner"),
+        pytest.param(("terminal", {"command": "cat /srv/deploy/config.yaml"}, {"output": "x", "exit_code": 0, "error": None}),
+                     "read", "ok", "self", id="path-named-like-deploy"),
+        pytest.param(("terminal", {"command": "touch /tmp/deployed.flag"}, {"output": "", "exit_code": 0, "error": None}),
+                     "write", "ok", "self", id="argument-named-like-deploy"),
+        pytest.param(("terminal", {"command": "cd app && bash scripts/deploy.sh prod"}, {"output": "", "exit_code": 0, "error": None}),
+                     "deploy", "ok", "self", id="deploy-script"),
     ],
 )
 def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, kind, status, provenance):
@@ -140,6 +148,10 @@ def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, ki
         pytest.param([DEPLOY_OK], "已重新啟動服務，設定檔也已寫入完成。", [("written", "no_write_evidence")],
                      id="evidenced-claim-does-not-hide-its-neighbour"),
         pytest.param([TEST_AND_DEPLOY], "測試通過，已部署完成。", [], id="chained-command-counts-for-each-step"),
+        pytest.param([("terminal", {"command": "pytest -q; ./deploy.sh"}, {"output": "ok", "exit_code": 0, "error": None})],
+                     "測試通過，已部署完成。", [], id="semicolon-chain"),
+        pytest.param([DELEGATE], "Claude 回報資料庫已經修好。另外，新介面已經部署上線了。",
+                     [("deployed", "only_subagent_report")], id="report-does-not-cover-a-new-subject"),
         pytest.param([BG_FAILED], "已部署完成。", [("deployed", "failed")], id="failed-spawn-is-a-failure"),
         pytest.param([DELEGATE], "Claude 回報已完成修改。測試都通過了。", [], id="attribution-carries-over"),
     ],
@@ -206,12 +218,28 @@ def test_verifier_evidence_shows_what_the_answer_relies_on_within_budget():
 
 
 def test_each_sentence_cites_the_evidence_it_was_judged_on():
-    evidence = classify_turn_evidence(_turn(READ_OK, WRITE_OK, TEST_OK))
+    answer = "我已寫入設定檔。測試全部通過。已部署到正式環境。設定檔裡的 debug 是 false。"
+    report = build_evidence_report(answer, _turn(READ_OK, WRITE_OK, TEST_OK))
 
-    assert evidence_refs_for("我已寫入設定檔。", evidence) == ("e_call_1",)
-    assert evidence_refs_for("測試全部通過。", evidence) == ("e_call_2",)
-    assert evidence_refs_for("已部署到正式環境。", evidence) == ()
-    assert evidence_refs_for("設定檔裡的 debug 是 false。", evidence) == ("e_call_0", "e_call_2")
+    assert evidence_refs_for("我已寫入設定檔。", report) == ("e_call_1",)
+    assert evidence_refs_for("測試全部通過。", report) == ("e_call_2",)
+    assert evidence_refs_for("已部署到正式環境。", report) == ()
+    assert evidence_refs_for("設定檔裡的 debug 是 false。", report) == ("e_call_0", "e_call_2")
+
+
+def test_a_sentence_keeps_the_attribution_of_the_one_before():
+    report = build_evidence_report("Claude 回報已完成修改。測試都通過了。", _turn(DELEGATE))
+
+    assert evidence_refs_for("測試都通過了。", report) == ("e_call_0",)
+
+
+def test_unsupported_line_shows_the_unbacked_clause_of_a_long_sentence():
+    answer = ("我已經修改了整個微服務叢集當中最核心也最複雜的那個設定檔案 app/config.yaml，並且很仔細地重新跑過"
+              "一輪完整的單元與整合測試，全部都通過了，服務也已經部署上線了。")
+    report = build_evidence_report(answer, _turn(WRITE_OK, TEST_OK))
+
+    (line,) = [line for line in report.digest.splitlines() if line.startswith("- [deployed]")]
+    assert "部署上線" in line
 
 
 def test_evidence_metadata_summarizes_the_report():

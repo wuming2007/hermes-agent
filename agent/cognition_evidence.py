@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from agent.cognition_claims import StateClaim, state_claims
+from agent.cognition_claims import StateClaim, normalize_sentence, state_claims
 from agent.display import _detect_tool_failure
 from agent.tool_result_classification import FILE_MUTATING_TOOL_NAMES, NO_EFFECT_TOOL_NAMES
 from tools.tool_search_catalog import TOOL_CALL_NAME
@@ -50,6 +50,7 @@ class ClaimCheck:
     supported: bool
     reason: str = ""
     evidence_ids: tuple[str, ...] = ()
+    span: tuple[int, int] = (0, 0)  # where in ``text`` the claim is made
 
 
 @dataclass(frozen=True)
@@ -74,14 +75,17 @@ _TOOL_KINDS = {
     "delegate_task": "delegate_report",
 }
 
-# First match wins, so a test that also redirects output is still a test.
+# First match wins, so a test that also redirects output is still a test. Runner and deploy names
+# count as the command word, not as part of a path (a tmp dir named pytest-of-ci is not a test).
 _COMMAND_KINDS = (
     ("test", re.compile(
-        r"\b(?:pytest|py\.test|tox|nox|jest|vitest|mocha|rspec|phpunit|unittest|run_tests)\b"
+        r"(?<![\w./-])(?:pytest|py\.test|tox|nox|jest|vitest|mocha|rspec|phpunit|unittest)(?![\w-])"
+        r"|(?:^|\s)\S*/(?:pytest|py\.test)(?=\s|$)|\brun_tests(?:\.sh)?\b"
         r"|\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\b(?:go|cargo|mix|dotnet|swift|deno)\s+test\b"
         r"|\bmake\s+(?:test|check)\b|\bgh\s+(?:run\s+(?:view|watch)|pr\s+checks)\b")),
     ("deploy", re.compile(
-        r"\bdeploy\w*|\bgit\s+push\b|\brestart\b|\breload\b"
+        r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:(?:bash|sh|zsh|npm\s+run|pnpm\s+run|yarn|make|fly|vercel|netlify)\s+)?"
+        r"(?:\S*/)?deploy[\w.-]*(?=\s|$)|\bgit\s+push\b|(?<![\w./-])(?:restart|reload)(?![\w-])"
         r"|\blaunchctl\s+(?:kickstart|bootstrap|load)\b|\bbrew\s+services\s+start\b"
         r"|\bdocker(?:\s+compose|-compose)?\s+(?:up|push)\b|\bkubectl\s+(?:apply|rollout|set|scale)\b"
         r"|\bhelm\s+(?:install|upgrade)\b|\b(?:npm|pnpm|yarn)\s+publish\b|\btwine\s+upload\b"
@@ -105,6 +109,15 @@ _PROCESS_ACTION_KINDS = {"list": "read"}
 def _command_kind(command: str) -> str:
     command = _LEADING_CD.sub("", command or "")
     return next((kind for kind, pattern in _COMMAND_KINDS if pattern.search(command)), "exec")
+
+
+_STATE_CHANGING = tuple(pattern for kind, pattern in _COMMAND_KINDS if kind in ("deploy", "write"))
+
+
+def command_changes_state(command: str) -> bool:
+    """Whether any step of a shell command looks like a write or a deploy, whatever else it runs."""
+    command = _LEADING_CD.sub("", command or "")
+    return any(pattern.search(command) for pattern in _STATE_CHANGING)
 
 
 def _command_kinds(command: str) -> frozenset:
@@ -338,16 +351,20 @@ def _check(claim: StateClaim, items: Sequence[EvidenceItem]) -> _Verdict:
 
 def check_claims(answer: str, evidence: Sequence[EvidenceItem]) -> tuple[ClaimCheck, ...]:
     """Judge every state claim of the answer against evidence of its own kind."""
-    return tuple(ClaimCheck(c.sentence, c.claim_class, *_check(c, evidence)) for c in state_claims(answer))
+    return tuple(ClaimCheck(c.sentence, c.claim_class, *_check(c, evidence), span=c.span)
+                 for c in state_claims(answer))
 
 
-def evidence_refs_for(sentence: str, evidence: Sequence[EvidenceItem]) -> tuple[str, ...]:
-    """Evidence ids behind one answer sentence: its state claims' own evidence (none if any is
-    unsupported), or for a plain factual sentence the turn's successful observations."""
-    verdicts = [_check(c, evidence) for c in state_claims(sentence)]
-    if verdicts:
-        return tuple(dict.fromkeys(i for _, _, ids in verdicts for i in ids)) if all(v[0] for v in verdicts) else ()
-    return tuple(e.evidence_id for e in evidence
+def evidence_refs_for(sentence: str, report: EvidenceReport) -> tuple[str, ...]:
+    """Evidence ids behind one sentence of the reported answer: its state claims' own evidence
+    (none if any is unsupported), or for a plain factual sentence the turn's successful
+    observations. Claims are looked up in the whole-answer report, where an attribution in the
+    sentence before still counts."""
+    key = normalize_sentence(sentence)
+    checks = [c for c in report.claims if c.text == key]
+    if checks:
+        return tuple(dict.fromkeys(i for c in checks for i in c.evidence_ids)) if all(c.supported for c in checks) else ()
+    return tuple(e.evidence_id for e in report.evidence
                  if e.provenance == "self" and e.status == "ok" and e.kind in _OBSERVATION_KINDS)[-5:]
 
 
@@ -392,6 +409,18 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def claim_excerpt(check: ClaimCheck, limit: int = 80) -> str:
+    """The claim's sentence cut to ``limit`` around the words that make the claim, so a long
+    sentence never shows its backed clauses and hides the unbacked one."""
+    text = check.text
+    if len(text) <= limit:
+        return text
+    start, end = check.span
+    lo = max(0, min(start - max(0, (limit - (end - start)) // 2), len(text) - limit))
+    hi = min(len(text), lo + limit)
+    return ("…" if lo else "") + text[lo:hi] + ("…" if hi < len(text) else "")
+
+
 def _rank(evidence: Sequence[EvidenceItem], tokens: Sequence[str]) -> list[EvidenceItem]:
     """Failures first, then results that mention what the answer mentions, then the kinds that
     bear on state claims, newest first."""
@@ -405,7 +434,7 @@ def _rank(evidence: Sequence[EvidenceItem], tokens: Sequence[str]) -> list[Evide
 
 def _render(evidence: Sequence[EvidenceItem], checks: Sequence[ClaimCheck], answer: str, *,
             budget: int, excerpts: bool) -> str:
-    gaps = [f"- [{c.claim_class}] {_clip(c.text, 80)} → {c.reason}"
+    gaps = [f"- [{c.claim_class}] {claim_excerpt(c)} → {c.reason}"
             + (f" ({', '.join(c.evidence_ids[:3])})" if c.evidence_ids else "") for c in checks if not c.supported]
     tail = (["Unsupported claims:", *gaps] if gaps else
             ["All state claims have evidence of their kind."] if checks else [])
@@ -447,7 +476,7 @@ def evidence_metadata(report: EvidenceReport) -> dict[str, Any]:
         "evidence_tool_result_count": len(report.evidence),
         "evidence_claim_count": len(report.claims),
         "evidence_supported_count": sum(c.supported for c in report.claims),
-        "evidence_unsupported": [{"class": c.claim_class, "reason": c.reason, "text": _clip(c.text, 200)}
+        "evidence_unsupported": [{"class": c.claim_class, "reason": c.reason, "text": claim_excerpt(c, 200)}
                                  for c in report.unsupported],
         "tool_evidence_present": any(e.provenance == "self" and e.status == "ok" for e in report.evidence),
     }

@@ -74,9 +74,11 @@ CLAIM_CLASSES = tuple(name for name, _ in CLAIM_PATTERNS)
 _NEGATION = re.compile(
     r"尚未|還沒|還未|沒有|並未|未能|無法|不能|不會|不是|沒|未|不"
     r"|\b(?:not|never|no|yet to|unable|cannot|can't|without)\b|n't\b", re.IGNORECASE)
+# Conditions, advice and hedges: "如果測試通過…", "make sure the tests pass", "I think it's fixed".
 _HYPOTHETICAL = re.compile(
-    r"是否|等待|待確認|如果|若|假如|一旦|確保|需要|應該|必須|直到|要讓"
-    r"|\b(?:if|when|once|until|unless|whether|make sure|ensure|should|must|needs? to|so that)\b", re.IGNORECASE)
+    r"是否|等待|待確認|如果|若|假如|一旦|確保|需要|應該|必須|直到|要讓|可能|大概|也許|或許|似乎|好像"
+    r"|\b(?:if|when|once|until|unless|whether|make sure|ensure|should|must|needs? to|so that"
+    r"|i think|i believe|probably|likely|maybe|perhaps|seems?)\b", re.IGNORECASE)
 _AFTER_CONDITION = re.compile(r"\s*(?:後|之後|以後|的話)")  # 部署完成後… is a condition
 _CLAUSE_BREAK = re.compile(r"[，,。；;！!？?：:\n]")
 _WINDOW = 16
@@ -84,6 +86,8 @@ _WINDOW = 16
 _ATTRIBUTION = re.compile(r"回報|表示|聲稱|指出|據|說|\b(?:reports?|reported|says|said|claims?|according to)\b",
                           re.IGNORECASE)
 _FIRST_PERSON = re.compile(r"我|\b(?:i|we)\b", re.IGNORECASE)
+_TOPIC_SHIFT = re.compile(r"^(?:另外|此外|還有|同時|順便|其次|最後)"
+                          r"|^(?:also|additionally|separately|besides|in addition|meanwhile|finally)\b", re.IGNORECASE)
 _FENCED_CODE = re.compile(r"```.*?```", re.DOTALL)
 _LEADING_MARKS = re.compile(r"^[^\w`]+")
 
@@ -93,12 +97,17 @@ class StateClaim:
     sentence: str
     claim_class: str
     attributed: bool  # the sentence relays someone else's account (e.g. "Claude 回報…")
+    span: tuple[int, int] = (0, 0)  # where in the sentence the claim is made
+
+
+def normalize_sentence(text: str) -> str:
+    """A sentence as claims are checked: no bold markers, list marks or doubled spaces."""
+    return _LEADING_MARKS.sub("", " ".join(str(text).replace("**", "").split())).strip()
 
 
 def _sentences(answer: str) -> list[str]:
-    text = _FENCED_CODE.sub(" ", answer or "").replace("**", "")
-    claims = extract_claims_from_response(text, max_claims=4 * MAX_CLAIMS)
-    return [s for s in (_LEADING_MARKS.sub("", claim.text).strip() for claim in claims) if s]
+    claims = extract_claims_from_response(_FENCED_CODE.sub(" ", answer or ""), max_claims=4 * MAX_CLAIMS)
+    return [s for s in (normalize_sentence(claim.text) for claim in claims) if s]
 
 
 def _asserted(sentence: str, match: re.Match) -> bool:
@@ -119,15 +128,15 @@ def _claim_span(pattern: re.Pattern, sentence: str, taken: list[tuple[int, int]]
 def state_claims(answer: str) -> tuple[StateClaim, ...]:
     """Every state claim in the answer, in sentence order and class precedence within a sentence.
 
-    An attribution ("Claude 回報…", "the subagent reports…") covers its sentence and the ones
-    after it until a sentence speaks in the first person again."""
+    An attribution ("Claude 回報…", "the subagent reports…") covers its own sentence and the next
+    one, unless that one speaks in the first person or changes the subject ("另外…"): a report
+    must not lend its authority to an unrelated claim further on."""
     claims: list[StateClaim] = []
-    attributed = False
+    carried = False
     for sentence in _sentences(answer):
-        if _ATTRIBUTION.search(sentence):
-            attributed = True
-        elif _FIRST_PERSON.search(sentence):
-            attributed = False
+        own = bool(_ATTRIBUTION.search(sentence))
+        attributed = own or (carried and not _FIRST_PERSON.search(sentence) and not _TOPIC_SHIFT.search(sentence))
+        carried = own
         if sentence.endswith(("?", "？")):
             continue
         taken: list[tuple[int, int]] = []
@@ -135,5 +144,5 @@ def state_claims(answer: str) -> tuple[StateClaim, ...]:
             span = _claim_span(pattern, sentence, taken)
             if span is not None:
                 taken.append(span)
-                claims.append(StateClaim(sentence, claim_class, attributed))
+                claims.append(StateClaim(sentence, claim_class, attributed, span))
     return tuple(claims[:MAX_CLAIMS])

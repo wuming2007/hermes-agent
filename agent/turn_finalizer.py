@@ -333,7 +333,7 @@ def _record_cognition_observers(agent, final_response, interrupted, logger, mess
                 _policy_refs = list(meta.get("policy_memory_citations") or [])
             _evidence = build_evidence_report(final_response, messages or [])
             _claims = [
-                replace(claim, evidence_refs=evidence_refs_for(claim.text, _evidence.evidence))
+                replace(claim, evidence_refs=evidence_refs_for(claim.text, _evidence))
                 for claim in extract_claims_from_response(final_response)
             ]
             _process_report = assess_claims(_claims, policy_refs=_policy_refs)

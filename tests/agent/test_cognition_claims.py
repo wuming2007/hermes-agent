@@ -20,6 +20,8 @@ from agent.cognition_claims import state_claims
         pytest.param("Let me know when you're done.", id="the-user-is-done"),
         pytest.param("Make sure the tests pass before merging.", id="advice"),
         pytest.param("I have not deployed it yet.", id="english-negation"),
+        pytest.param("I think the bug is fixed.", id="english-hedge"),
+        pytest.param("可能已經修好了。", id="cjk-hedge"),
         pytest.param("部署完成後，服務會自動重啟。", id="condition-after"),
         pytest.param("如果測試通過，就可以合併。", id="condition-before"),
         pytest.param("需要的話，我可以幫你部署。", id="offer"),
@@ -50,8 +52,16 @@ def test_state_claims_are_found_per_sentence_and_class(answer, classes):
     assert [c.claim_class for c in state_claims(answer)] == classes
 
 
-def test_attribution_covers_following_sentences_until_we_speak_for_ourselves():
-    claims = state_claims("Claude 回報已完成修改。測試都通過了。我也已經部署完成。")
-
-    assert [(c.claim_class, c.attributed) for c in claims] == [
-        ("written", True), ("tests_pass", True), ("deployed", False)]
+@pytest.mark.parametrize(
+    "answer, expected",
+    [
+        pytest.param("Claude 回報已完成修改。測試都通過了。我也已經部署完成。",
+                     [("written", True), ("tests_pass", True), ("deployed", False)], id="first-person-ends-it"),
+        pytest.param("Claude 回報資料庫已經修好。另外，新介面已經部署上線了。",
+                     [("working", True), ("deployed", False)], id="change-of-subject-ends-it"),
+        pytest.param("Claude 回報已完成修改。測試都通過了。服務也已經部署完成。",
+                     [("written", True), ("tests_pass", True), ("deployed", False)], id="reaches-one-sentence-on"),
+    ],
+)
+def test_an_attribution_covers_its_sentence_and_the_next(answer, expected):
+    assert [(c.claim_class, c.attributed) for c in state_claims(answer)] == expected
