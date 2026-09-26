@@ -1,10 +1,11 @@
-"""Evidence stop gate: one bounded, read-only check before an answer states results the turn's
-tools do not show, and an evidence note on whatever stays unverified.
+"""Evidence stop gate: one bounded check before an answer states results the turn's tools do
+not show, and an evidence note on whatever stays unverified.
 
 Opt-in (``cognition.evidence_loop.enabled``). When the model stops with state claims that
 ``agent.cognition_evidence`` finds unsupported, ``agent.turn_stop_gates`` appends the candidate and
 a flagged nudge (neither is stored nor shown, like the kanban gate) and the turn continues under a
-dispatch-side policy that runs only read-only calls, at most ``max_extra_tool_calls``. The next
+dispatch-side policy that runs only checks (reads, test runs, commands that change nothing
+``agent.command_effects`` can tell), at most ``max_extra_tool_calls``. The next
 answer is final; claims it still cannot back get a short note appended before the answer is
 stored, so what is stored is what the user sees.
 """
@@ -15,13 +16,8 @@ import re
 import threading
 from typing import Any, Optional, Sequence
 
-from agent.cognition_evidence import (
-    ClaimCheck,
-    EvidenceReport,
-    build_evidence_report,
-    claim_excerpt,
-    command_changes_state,
-)
+from agent.cognition_evidence import ClaimCheck, EvidenceReport, build_evidence_report, claim_excerpt
+from agent.command_effects import command_changes_state
 from agent.tool_result_classification import NO_EFFECT_TOOL_NAMES
 
 EVIDENCE_STOP_FLAG = "_evidence_stop_synthetic"
@@ -72,14 +68,16 @@ def _read_only(tool_name: str, args: dict) -> bool:
         return args.get("action") in _PROCESS_READ_ACTIONS
     if tool_name == "terminal":
         command = str(args.get("command") or "")
-        # Conservative on purpose: any step that looks like a write or deploy blocks the command.
+        # Conservative on purpose: a step that would launch an agent, migrate data, change a repo,
+        # deploy or write a file blocks the command, however it is wrapped. Running a program to
+        # see whether it works is a check, so an effect that cannot be told is allowed here.
         return bool(command) and not args.get("background") and not command_changes_state(command)
     return False
 
 
 class EvidenceRound:
     """Dispatch policy for the check round (``hermes_cli.plugins.set_thread_tool_policy``):
-    read-only calls only, at most ``max_calls`` of them. Tool workers call it concurrently, and
+    checks only, at most ``max_calls`` of them. Tool workers call it concurrently, and
     one call may be checked at more than one dispatch layer, so admissions count per call id."""
 
     def __init__(self, max_calls: int):

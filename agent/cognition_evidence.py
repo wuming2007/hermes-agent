@@ -112,13 +112,10 @@ def command_kind(command: str) -> str:
     return next((kind for kind, pattern in _COMMAND_KINDS if pattern.search(command)), "exec")
 
 
-_STATE_CHANGING = tuple(pattern for kind, pattern in _COMMAND_KINDS if kind in ("deploy", "write"))
-
-
-def command_changes_state(command: str) -> bool:
-    """Whether any step of a shell command looks like a write or a deploy, whatever else it runs."""
+def matching_command_kinds(command: str) -> frozenset:
+    """Every kind whose pattern matches a shell command (``command_kind`` keeps only the first)."""
     command = _LEADING_CD.sub("", command or "")
-    return any(pattern.search(command) for pattern in _STATE_CHANGING)
+    return frozenset(kind for kind, pattern in _COMMAND_KINDS if pattern.search(command))
 
 
 def _command_kinds(command: str) -> frozenset:

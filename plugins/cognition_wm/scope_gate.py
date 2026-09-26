@@ -6,6 +6,10 @@
   the existing human-approval prompt.
 - A recorded authorization decides per action class: forbidden blocks; ask_first, or a grant
   from an earlier run, goes to the approval prompt; a grant made in this run says nothing.
+- Shell commands and ``execute_code`` scripts are read through ``agent.command_effects``, however
+  they are wrapped. A command whose effect cannot be told (``python3 refactor.py``) is stopped like
+  any execution while the task is stopped or the user's new limit is unrecorded, and goes to the
+  approval prompt while the user forbids any action for the task.
 - Read-only tools, ``task_state`` and ``clarify`` are never gated, and working-memory state is
   never written into long-term memory.
 
@@ -16,46 +20,41 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
+from agent.command_effects import (
+    AGENT_LAUNCH,
+    DEPLOY,
+    FILE_WRITE,
+    MIGRATION,
+    REPO_CHANGE,
+    UNKNOWN,
+    code_effects,
+    command_effects,
+)
 from plugins.cognition_wm import provenance, runtime
 from plugins.cognition_wm.model import clip
 
 logger = logging.getLogger(__name__)
 
+UNKNOWN_EFFECT = "unknown_effect"  # gate-internal: never recorded as a rule's action class
 _CLASS_ORDER = ("coding_agent_launch", "data_migration", "deploy_restart", "repo_write", "code_change",
-                "external_message", "other")
+                "external_message", "other", UNKNOWN_EFFECT)
 _TOOL_CLASSES = {
     "write_file": "code_change", "patch": "code_change", "delegate_task": "coding_agent_launch",
     "send_message": "external_message", "kanban_create": "other",
 }
+_EFFECT_CLASSES = {
+    AGENT_LAUNCH: "coding_agent_launch", MIGRATION: "data_migration", DEPLOY: "deploy_restart",
+    REPO_CHANGE: "repo_write", FILE_WRITE: "code_change", UNKNOWN: UNKNOWN_EFFECT,
+}
 _PROCESS_ACTIONS = frozenset({"write", "submit"})
-_CHAIN = re.compile(r"\s*(?:&&|\|\||;|\|)\s*")
-# Checked per command step, in order; a step matching none falls back to its evidence kind.
-_STEP_CLASSES: tuple[tuple[str, re.Pattern], ...] = (
-    ("coding_agent_launch", re.compile(
-        r"^(?:\S*/)?(?:claude|codex|opencode|aider|gemini|cursor-agent)\b|^hermes\s+chat\b|^tmux\s+send-keys\b")),
-    ("data_migration", re.compile(
-        r"^(?:alembic|flyway|liquibase)\b|\bmanage\.py\s+migrate\b|^(?:npx\s+)?prisma\s+migrate\b|\bdb:migrate\b")),
-    ("repo_write", re.compile(
-        r"^git\s+(?:commit|push|merge|rebase|reset|checkout|switch|restore|cherry-pick|revert|tag|stash|am|apply"
-        r"|rm|mv|add|pull)\b")),
-)
-_EVIDENCE_CLASSES = {"deploy": "deploy_restart", "write": "code_change"}
 _WM_TRACE = re.compile(r"<working-memory|\bt_[0-9a-f]{12}\b|internal task state kept by Hermes")
 _STOPPED = {"paused": "paused", "cancelled": "cancelled"}
 
 
-def _step_class(step: str) -> Optional[str]:
-    from agent.cognition_evidence import command_kind
-
-    step = re.sub(r"^(?:sudo|env(?:\s+\w+=\S+)+|nohup)\s+", "", step.strip())
-    matched = next((cls for cls, pattern in _STEP_CLASSES if pattern.search(step)), None)
-    return matched or _EVIDENCE_CLASSES.get(command_kind(step))
-
-
-def _terminal_classes(args: dict) -> set[str]:
-    return {cls for step in _CHAIN.split(str(args.get("command") or "")) if step and (cls := _step_class(step))}
+def _classes(effects: Iterable[str]) -> set[str]:
+    return {_EFFECT_CLASSES[effect] for effect in effects}
 
 
 def _fixed(cls: str) -> Callable[[dict], set[str]]:
@@ -64,7 +63,8 @@ def _fixed(cls: str) -> Callable[[dict], set[str]]:
 
 # tool name -> the action classes a call with these arguments would exercise
 _CLASSIFIERS: dict[str, Callable[[dict], set[str]]] = {
-    "terminal": _terminal_classes,
+    "terminal": lambda args: _classes(command_effects(str(args.get("command") or ""))),
+    "execute_code": lambda args: _classes(code_effects(str(args.get("code") or ""))),
     "process_manage": lambda args: {"other"} if args.get("action") in _PROCESS_ACTIONS else set(),
     "cronjob_manage": lambda args: {"other"} if args.get("action") not in ("list", "show", None) else set(),
     **{name: _fixed(cls) for name, cls in _TOOL_CLASSES.items()},
@@ -115,6 +115,11 @@ def _authorized(turn: runtime.TurnState, classes: tuple[str, ...], tool_name: st
                    else "the permission was given in an earlier session and must be confirmed again")
             return {"action": "approve", "message": f"{cls} for task {focus.task_id}: {why} (\"{clip(words, 120)}\").",
                     "rule_key": f"cognition:{focus.task_id}:{cls}"}
+    forbidden = next((cls for cls in _CLASS_ORDER if grants.get(cls) == "forbidden"), None)
+    if UNKNOWN_EFFECT in classes and forbidden:
+        return {"action": "approve", "rule_key": f"cognition:{focus.task_id}:{UNKNOWN_EFFECT}",
+                "message": f"what '{tool_name}' would change cannot be told from the call, and the user forbade "
+                           f"{forbidden} for task {focus.task_id} (\"{clip(rules.get(forbidden, ''), 120)}\")."}
     return None
 
 

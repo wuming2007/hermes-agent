@@ -42,21 +42,27 @@ output cannot.
 ## What it enforces
 
 - A paused or cancelled task stays stopped: execution tools (writes, repo-changing git, coding
-  agents, deploys and restarts, migrations, messages) are blocked, also under `/yolo`.
+  agents, deploys and restarts, migrations, messages) are blocked, also under `/yolo`. So is a
+  shell command whose effect cannot be told from the command, such as `python3 refactor.py`.
 - A limit the user just gave ("only the prompt, don't change the repo") sends execution tools to
   the approval prompt until the model records it.
-- A permission the user gave in an earlier session must be confirmed again.
+- A permission the user gave in an earlier session must be confirmed again. While the user forbids
+  an action for the task, a command whose effect cannot be told goes to the approval prompt.
+- Shell commands are read however they are wrapped: chains, pipes, several lines, `sudo`/`env`/
+  `timeout` prefixes, `bash -c`, `eval`, `npx`, command substitution, and `python -c`/`node -e`
+  one-liners. Tool calls made inside `execute_code` are gated like direct calls.
 - Working-memory state is never written into long-term memory.
-- With the evidence loop on, an answer with unbacked claims gets one read-only check round (at
-  most `max_extra_tool_calls` calls); claims that stay unbacked are marked as unverified in the
-  answer that is stored and shown.
+- With the evidence loop on, an answer with unbacked claims gets one check round (at most
+  `max_extra_tool_calls` calls: reads, test runs and commands that check something, never a write,
+  repo change, deploy, migration or agent launch); claims that stay unbacked are marked as
+  unverified in the answer that is stored and shown.
 
 ## Settings
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `cognition.evidence_loop.max_rounds` | `1` | check rounds per turn |
-| `cognition.evidence_loop.max_extra_tool_calls` | `3` | read-only calls in a check round |
+| `cognition.evidence_loop.max_extra_tool_calls` | `3` | calls in a check round |
 | `cognition.consistency_guard.evidence_context` | `true` | the deep-route verifier sees the turn's tool results |
 | `plugins.entries.cognition_wm.settings.snapshot_max_chars` | `1600` | largest snapshot |
 | `plugins.entries.cognition_wm.settings.other_open_tasks_max` | `3` | other open tasks listed |
@@ -75,5 +81,8 @@ deleting that file removes it completely.
 - A task, limit or permission counts only once the model records it; the snapshot and the
   approval prompt ask it to.
 - Claims read off an earlier session's records are not yet dated ("as of …").
-- Command classification is heuristic: an unusual way of writing files or deploying can slip past
-  the scope gate, and the approval rules still apply to it.
+- Command reading is heuristic and never runs anything: code imported by a one-liner, or a command
+  deliberately disguised (built from pieces at run time), can slip past it; the approval rules
+  still apply to such calls.
+- Only the execution tools named above, shell commands and `execute_code` are gated; tools that
+  act on the desktop or in a browser are not.
