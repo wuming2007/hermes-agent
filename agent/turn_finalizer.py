@@ -681,19 +681,36 @@ def finalize_turn(
 
     _rollback_interrupted_preflight_display(agent, interrupted)
 
+    _cleanup_errors: List[str] = []
+    # Recover a stream-delivered answer (#95514) before anything below reads the response:
+    # the cognition guard, its observers and the persist step must all see the text that is
+    # stored and returned. ``completed`` above keeps its reading of the pre-recovery response.
+    _recovered_from_stream = False
+
+    def _recover_step():
+        nonlocal final_response, _recovered_from_stream
+        final_response, _recovered_from_stream = _recover_final_from_stream(
+            agent, final_response, interrupted, failed
+        )
+
+    _guarded_cleanup("recover_final_from_stream", _recover_step, _cleanup_errors, logger)
+
     # ── Cognition post-generation pipeline (PR3/PR16/PR18/PR7) ───────
     # Text-response exits already ran the guard before their durable flush; this
-    # catches every other exit (budget summary, recovery breaks) before the trajectory
-    # save and the persist step below. Observers run after the guard has settled the
-    # response so the trajectory metadata and the result carry the final trace.
+    # catches every other exit (budget summary, recovery breaks, stream recovery) before
+    # the trajectory save and the persist step below. Observers run after the guard has
+    # settled the response so the trajectory metadata and the result carry the final trace.
     if not interrupted:
         final_response = apply_cognition_consistency_guard(
             agent, final_response, turn_id=turn_id, user_message=original_user_message,
-            logger=logger, messages=messages,
+            logger=logger,
+            # A stream-recovered answer has no transcript row yet; ``_close_transcript_tail``
+            # writes it and re-arms the blank row the stream may have flushed. Pre-filling
+            # that row here would leave it marked as stored while SQLite still holds blank.
+            messages=None if _recovered_from_stream else messages,
         )
     _cognition_trace = _record_cognition_observers(agent, final_response, interrupted, logger)
 
-    _cleanup_errors: List[str] = []
     # The model has answered (or the loop gave up): a title upgrade held back because it shares a
     # self-hosted endpoint with the main request (#117296) may go out now.
     from agent.turn_context import start_deferred_title_upgrade
@@ -710,15 +727,12 @@ def finalize_turn(
     )
     # Persist only after the transcript tail is shaped and scaffolding removed. Each
     # sub-step runs in the same order as the original inline block, and the
-    # stream-recovered ``final_response`` is rebound the moment it is computed — BEFORE
-    # the fallible tail-shaping / override / micro-compaction / persist calls — so a
-    # raise in any of them can't drop text the user already saw (#95514, #8049).
+    # stream-recovered ``final_response`` was bound above — BEFORE the fallible
+    # tail-shaping / override / micro-compaction / persist calls — so a raise in any of
+    # them can't drop text the user already saw (#95514, #8049).
     def _persist_step():
         nonlocal final_response
         _drop_transcript_scaffolding(agent, messages)
-        final_response, _recovered_from_stream = _recover_final_from_stream(
-            agent, final_response, interrupted, failed
-        )
         # Recovery paths (stream-recovered / prior-turn text) reach here with a response no
         # earlier seam transformed; the normal text turn already did this before its flush and
         # gets the recorded outcome back. Either way the tail close below writes the text the
