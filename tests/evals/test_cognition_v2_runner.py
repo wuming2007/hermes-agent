@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.fakes.fake_llm_provider import FakeLLMServer, Text, write_hermes_home
+from tests.fakes.fake_llm_provider import FakeLLMServer, Text, ToolCall, write_hermes_home
 
 _NO_BORROWED_LOGINS = "auth:\n  adopt_external_logins: false\n"
 
@@ -72,3 +72,83 @@ def test_an_eval_home_that_could_borrow_a_login_is_refused(tmp_path, monkeypatch
 
     with pytest.raises(SystemExit):
         runner.run(home, cases, tmp_path / "out.jsonl", arms=["off"], repeats=1, case_set="dev")
+
+
+def _confinement_available():
+    from evals.cognition_v2 import sandbox
+
+    return sandbox.available()
+
+
+@pytest.mark.skipif(not _confinement_available(), reason="the evaluation's confinement is macOS sandbox-exec")
+def test_the_confinement_keeps_a_run_inside_the_eval_home(tmp_path):
+    import subprocess
+    import sys
+
+    from evals.cognition_v2 import sandbox
+
+    home, data = tmp_path / "home", tmp_path / "data"
+    eval_home = home / "eval-home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_test").write_text("not for the run", encoding="utf-8")
+    eval_home.mkdir()
+    data.mkdir()
+    agent = tmp_path / "bin" / "claude"
+    agent.parent.mkdir()
+    agent.write_text(f"#!/bin/sh\ntouch '{tmp_path / 'agent-ran'}'\n", encoding="utf-8")
+    agent.chmod(0o755)
+    profile = tmp_path / "run.sb"
+    profile.write_text(sandbox.profile(eval_home=eval_home, repo=Path(sandbox.__file__).resolve().parents[2], home=home,
+                                       python_root=Path(sys.executable).resolve().parents[1], denied=[agent],
+                                       protected=[data]), encoding="utf-8")
+    script = (f"echo ok > '{eval_home}/w' && echo EVAL_HOME_WRITABLE\n"
+              f"echo x > '{home}/w' 2>/dev/null || echo HOME_WRITE_DENIED\n"
+              f"echo x > '{data}/w' 2>/dev/null || echo DATA_WRITE_DENIED\n"
+              f"cat '{home}/.ssh/id_test' >/dev/null 2>&1 || echo HOME_READ_DENIED\n"
+              f"'{agent}' >/dev/null 2>&1 || echo AGENT_DENIED\n"
+              f"'{sys.executable}' -c 'import hermes_cli, run_agent' && echo CODE_LOADS\n")
+
+    out = subprocess.run([str(sandbox.SANDBOX_EXEC), "-f", str(profile), "/bin/sh", "-c", script],
+                         capture_output=True, text=True, timeout=120).stdout
+
+    for marker in ("EVAL_HOME_WRITABLE", "HOME_WRITE_DENIED", "DATA_WRITE_DENIED", "HOME_READ_DENIED", "AGENT_DENIED",
+                   "CODE_LOADS"):
+        assert marker in out
+    assert not (home / "w").exists() and not (data / "w").exists() and not (tmp_path / "agent-ran").exists()
+
+
+@pytest.mark.skipif(not _confinement_available(), reason="the evaluation's confinement is macOS sandbox-exec")
+def test_the_evaluation_runs_confined_and_a_coding_agent_is_only_a_stand_in(tmp_path):
+    from evals.cognition_v2 import runner, sandbox
+
+    home = tmp_path / "eval-home"
+    runner.init_home(home)
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(json.dumps({"id": "prompt-only", "turns": ["幫我寫一段給 Claude 的 prompt"]}) + "\n", encoding="utf-8")
+    out = tmp_path / "rows.jsonl"
+    script = [ToolCall("terminal", {"command": "claude -p 'refactor the parser'"}), Text("這是 prompt：……")]
+
+    with FakeLLMServer(script) as server:
+        write_hermes_home(home, server.base_url, extra_config=_NO_BORROWED_LOGINS)
+        with pytest.raises(SystemExit) as exit_:
+            runner.main(["--home", str(home), "--cases", str(cases), "--out", str(out), "--arms", "off",
+                         "--repeats", "1"])
+
+    assert exit_.value.code == 0
+    (row,) = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert any("claude -p" in call for call in row["calls"])
+    assert sandbox.command_log(home) == ["claude -p refactor the parser"]
+
+
+def test_without_confinement_the_evaluation_does_not_run(tmp_path, monkeypatch):
+    from evals.cognition_v2 import runner, sandbox
+
+    home = tmp_path / "eval-home"
+    runner.init_home(home)
+    monkeypatch.setattr(sandbox, "available", lambda: False)
+    monkeypatch.delenv(sandbox.MARKER_ENV, raising=False)
+
+    with pytest.raises(SystemExit) as exit_:
+        runner.main(["--home", str(home), "--cases", str(tmp_path / "c.jsonl"), "--out", str(tmp_path / "o.jsonl")])
+
+    assert "confined" in str(exit_.value.code)

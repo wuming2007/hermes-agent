@@ -17,6 +17,15 @@ The scripted, reproducible version of these scenarios is the test suite
   The runner refuses a home where it is on.
 - Toolsets are `file`, `terminal` and `cognition_wm`: no messaging, web, cron or subagents.
   Every case runs in its own directory under `<eval home>/eval-work/`.
+- A separate HERMES_HOME and work directory are not a sandbox, so the run is re-executed under a
+  macOS Seatbelt profile (`sandbox.py`; it refuses to run where `sandbox-exec` is missing): the real
+  home and `/Volumes/Data` can be neither read nor written except the eval home, this checkout and
+  the Python install; the run gets its own HOME inside the eval home; `claude`, `codex` and the other
+  coding agents on its PATH are stand-ins that only log the call (`fake-bin/calls.log`); running the
+  real agents, `launchctl`, `osascript`, `open`, `crontab`, `sudo`, `security`, `hermes` and the usual
+  network clients is denied.
+- What stays open: network (the model's API) and reading the eval home, including its own login.
+  Every call a case made is in its result row (`calls`) for review.
 - Turns run non-interactively, so an action that needs human approval is denied, exactly as in
   `hermes chat -q`.
 - The eval home's `config.yaml` is restored after the run.

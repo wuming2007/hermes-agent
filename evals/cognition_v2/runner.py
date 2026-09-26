@@ -33,6 +33,10 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
+if __package__ in (None, ""):  # run as a script: import the checkout, not an installed copy
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from evals.cognition_v2 import sandbox  # noqa: E402
+
 MARKER = ".cognition-v2-eval"
 TOOLSETS = ["file", "terminal", "cognition_wm"]
 ARMS = {
@@ -133,6 +137,7 @@ def _run_case(case: dict, arm_name: str, repeat: int, work_root: Path) -> Iterab
         wall = time.monotonic() - started
         user_row, rows = _turn_rows(result.get("messages") or [])
         tools = [m for m in rows if m.get("role") == "tool"]
+        calls = [c.get("function") or {} for m in rows if m.get("role") == "assistant" for c in m.get("tool_calls") or []]
         evidence = ((getattr(agent, "_current_turn_cognition_metadata", None) or {}).get("cognition_trace") or {}
                     ).get("evidence") or {}
         yield {
@@ -147,6 +152,8 @@ def _run_case(case: dict, arm_name: str, repeat: int, work_root: Path) -> Iterab
             "evidence_unsupported": len(evidence.get("unsupported") or []),
             "evidence_downgraded": evidence.get("downgraded", False),
             "final_response": str(result.get("final_response") or "")[:800],
+            # every call the model made, for review: a confined run should show nothing outside the case
+            "calls": [f"{c.get('name')} {str(c.get('arguments') or '')[:300]}" for c in calls],
         }
 
 
@@ -213,6 +220,12 @@ def main(argv: list[str] | None = None) -> None:
     elif args.summarize:
         print(json.dumps(summarize(args.summarize), ensure_ascii=False, indent=2))
     elif args.home and args.cases and args.out:
+        if os.environ.get(sandbox.MARKER_ENV) != "1":
+            _check_home(args.home)
+            if not sandbox.available():
+                sys.exit("the real-model evaluation runs only confined (macOS sandbox-exec); none is available here")
+            options = ["--arms", args.arms, "--repeats", str(args.repeats), "--set", args.case_set]
+            sys.exit(sandbox.rerun_confined(eval_home=args.home, cases=args.cases, out=args.out, options=options))
         run(args.home, args.cases, args.out, arms=args.arms.split(","), repeats=args.repeats, case_set=args.case_set)
     else:
         parser.error("use --init-home, --summarize, or --home/--cases/--out")
