@@ -12,6 +12,9 @@ The scripted, reproducible version of these scenarios is the test suite
 
 - Runs only in an eval home created with `--init-home`, never in the everyday `~/.hermes`.
 - The user logs in to the eval home themselves. Nothing copies credentials from another home.
+- `--init-home` sets `auth.adopt_external_logins: false`, so the eval home never borrows the Codex
+  CLI or Claude Code login (their refresh tokens rotate, so borrowing can log those programs out).
+  The runner refuses a home where it is on.
 - Toolsets are `file`, `terminal` and `cognition_wm`: no messaging, web, cron or subagents.
   Every case runs in its own directory under `<eval home>/eval-work/`.
 - Turns run non-interactively, so an action that needs human approval is denied, exactly as in
@@ -22,7 +25,8 @@ The scripted, reproducible version of these scenarios is the test suite
 
 ```bash
 python evals/cognition_v2/runner.py --init-home ~/hermes-eval-home
-HERMES_HOME=~/hermes-eval-home hermes login          # once, by the user
+HERMES_HOME=~/hermes-eval-home hermes auth add openai-codex --type oauth   # once, by the user;
+#   use the provider you use every day, and answer N if it offers to import another program's login
 # pick the model in ~/hermes-eval-home/config.yaml (the one used every day)
 python evals/cognition_v2/runner.py --home ~/hermes-eval-home \
     --cases evals/cognition_v2/cases.example.jsonl --out results.jsonl --set dev --repeats 3

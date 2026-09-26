@@ -8,10 +8,12 @@ size, the evidence-loop outcome and the final answer.
 
 Runs only in a dedicated eval home made with ``--init-home`` (never the everyday ``~/.hermes``).
 The toolsets are file, terminal and task_state: no messaging, web, cron or subagents, so a case
-cannot reach anyone. The user logs in to the eval home themselves; nothing copies credentials.
+cannot reach anyone. The user logs in to the eval home themselves; nothing copies credentials,
+and the eval home never borrows the Codex CLI or Claude Code login (``auth.adopt_external_logins``
+is turned off by ``--init-home`` and checked before every run).
 
     python evals/cognition_v2/runner.py --init-home ~/hermes-eval-home
-    HERMES_HOME=~/hermes-eval-home hermes login        # the user, once
+    HERMES_HOME=~/hermes-eval-home hermes auth add openai-codex --type oauth   # the user, once
     python evals/cognition_v2/runner.py --home ~/hermes-eval-home \\
         --cases evals/cognition_v2/cases.example.jsonl --out /tmp/cv2.jsonl --set dev --repeats 3
     python evals/cognition_v2/runner.py --summarize /tmp/cv2.jsonl
@@ -41,10 +43,28 @@ METRICS = ("wall_s", "api_calls", "tool_calls", "blocked_tool_calls", "prompt_to
            "snapshot_chars", "evidence_rounds", "evidence_unsupported")
 
 
+def _borrows_logins(home: Path) -> bool:
+    """Whether the home would borrow the Codex CLI / Claude Code login (``auth.adopt_external_logins``,
+    on by default): their refresh tokens rotate, so a borrowed login can log those programs out."""
+    from hermes_cli.config import read_user_config_raw
+
+    path = home / "config.yaml"
+    auth = (read_user_config_raw(path) if path.exists() else {}).get("auth")
+    return not isinstance(auth, dict) or auth.get("adopt_external_logins", True) is not False
+
+
 def init_home(home: Path) -> None:
+    from hermes_cli.config import atomic_config_write, read_user_config_raw
+
     home.mkdir(parents=True, exist_ok=True)
     (home / MARKER).write_text("cognition v2 eval home — safe to delete\n", encoding="utf-8")
-    print(f"eval home ready: {home}\nlog in there yourself: HERMES_HOME={home} hermes login")
+    path = home / "config.yaml"
+    data = read_user_config_raw(path) if path.exists() else {}
+    data.setdefault("auth", {})["adopt_external_logins"] = False  # only the login made in this home
+    atomic_config_write(path, data)
+    print(f"eval home ready: {home}\n"
+          f"log in there yourself: HERMES_HOME={home} hermes auth add openai-codex --type oauth\n"
+          "(answer N if it offers to import the Codex CLI credentials)")
 
 
 def _check_home(home: Path) -> None:
@@ -54,6 +74,9 @@ def _check_home(home: Path) -> None:
         sys.exit(f"refusing to run in the everyday home {everyday}; use a dedicated eval home")
     if not (resolved / MARKER).exists():
         sys.exit(f"{home} is not an eval home; create one with --init-home")
+    if _borrows_logins(resolved):
+        sys.exit(f"{home} could borrow another program's login; set auth.adopt_external_logins: false "
+                 "(--init-home does)")
 
 
 def _set_arm(home: Path, arm: dict) -> None:

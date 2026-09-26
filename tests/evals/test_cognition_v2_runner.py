@@ -11,6 +11,8 @@ import pytest
 
 from tests.fakes.fake_llm_provider import FakeLLMServer, Text, write_hermes_home
 
+_NO_BORROWED_LOGINS = "auth:\n  adopt_external_logins: false\n"
+
 
 def test_both_arms_are_measured_and_the_config_is_restored(tmp_path, monkeypatch):
     from evals.cognition_v2 import runner
@@ -24,7 +26,7 @@ def test_both_arms_are_measured_and_the_config_is_restored(tmp_path, monkeypatch
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.chdir(tmp_path)
     with FakeLLMServer([], default_text="今天天氣不錯。") as server:
-        write_hermes_home(home, server.base_url)
+        write_hermes_home(home, server.base_url, extra_config=_NO_BORROWED_LOGINS)
         before = (home / "config.yaml").read_text(encoding="utf-8")
         runner.run(home, cases, out, arms=["off", "on"], repeats=1, case_set="dev")
 
@@ -46,3 +48,27 @@ def test_the_everyday_home_is_refused(tmp_path, monkeypatch):
 
     with pytest.raises(SystemExit):
         runner.run(everyday, tmp_path / "cases.jsonl", tmp_path / "out.jsonl", arms=["off"], repeats=1, case_set="dev")
+
+
+def test_a_new_eval_home_never_borrows_another_programs_login(tmp_path, monkeypatch):
+    from agent.credential_sources import adopt_external_logins_enabled
+    from evals.cognition_v2 import runner
+
+    home = tmp_path / "eval-home"
+    runner.init_home(home)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    assert adopt_external_logins_enabled() is False
+
+
+def test_an_eval_home_that_could_borrow_a_login_is_refused(tmp_path, monkeypatch):
+    from evals.cognition_v2 import runner
+
+    home = tmp_path / "eval-home"
+    runner.init_home(home)
+    (home / "config.yaml").write_text("auth:\n  adopt_external_logins: true\n", encoding="utf-8")
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(json.dumps({"id": "chat", "turns": ["hi"]}) + "\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        runner.run(home, cases, tmp_path / "out.jsonl", arms=["off"], repeats=1, case_set="dev")
