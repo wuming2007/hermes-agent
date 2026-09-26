@@ -21,6 +21,31 @@ _TRUNCATION_MARKER = "… [truncated]"
 TODO_INJECTION_HEADER = "[Your active task list was preserved across context compression]"
 _STATUS_MARKERS = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
 _ACTIVE_STATUSES = {"pending", "in_progress"}
+# Current and pre-rename names: history written before the rename must still hydrate.
+TODO_TOOL_NAMES = frozenset({"todo_list", "todo"})
+
+
+def is_todo_tool_call(tool_call: Any) -> bool:
+    """True when a recorded tool_call entry (dict or SDK object) ran this tool: by name, or as the
+    single local entry of a ``tool_call`` bridge invocation — the curated default defers
+    ``todo_list`` behind the bridge, so that is how most sessions actually call it."""
+    fn = tool_call.get("function") if isinstance(tool_call, dict) else getattr(tool_call, "function", None)
+    name = (fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", None)) or ""
+    if name in TODO_TOOL_NAMES:
+        return True
+    from tools.tool_search_catalog import TOOL_CALL_NAME
+    if name != TOOL_CALL_NAME:
+        return False
+    raw = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", None)
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(args, dict):
+        return False
+    from tools.tool_search_validation import normalize_tool_call_entries
+    entries, error = normalize_tool_call_entries(args)
+    return error is None and len(entries) == 1 and entries[0].get("name") in TODO_TOOL_NAMES
 
 
 class TodoStore:
