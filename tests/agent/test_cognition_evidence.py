@@ -62,6 +62,17 @@ BG_FAILED = ("terminal", {"command": "./deploy.sh", "background": True},
              {"output": "", "exit_code": -1, "error": "Failed to start background process: no such file"})
 TEST_AND_DEPLOY = ("terminal", {"command": "pytest -q && ./deploy.sh"},
                    {"output": "3 passed\ndeployed", "exit_code": 0, "error": None})
+ALPHA_TEST = ("terminal", {"command": "pytest tests/test_alpha.py -q"}, {"output": "4 passed", "exit_code": 0, "error": None})
+BETA_TEST = ("terminal", {"command": "pytest tests/test_beta.py -q"}, {"output": "3 passed", "exit_code": 0, "error": None})
+SKIPPED_TEST = ("terminal", {"command": "true || pytest tests/test_beta.py"}, {"output": "", "exit_code": 0, "error": None})
+MASKED_TEST = ("terminal", {"command": "pytest -q || true"}, {"output": "1 failed", "exit_code": 0, "error": None})
+PIPED_TEST = ("terminal", {"command": "pytest -q 2>&1 | tail -5"}, {"output": "1 failed", "exit_code": 0, "error": None})
+TEST_THEN_EDIT = ("terminal", {"command": "pytest -q && sed -i 's/a/b/' app/config.yaml"},
+                  {"output": "3 passed", "exit_code": 0, "error": None})
+AGENT_RUN = ("terminal", {"command": "claude -p 'run pytest and fix the failures'"},
+             {"output": "All tests pass now.", "exit_code": 0, "error": None})
+AGENT_THEN_TEST = ("terminal", {"command": "claude -p 'fix the parser' && pytest -q"},
+                   {"output": "fixed\n3 passed", "exit_code": 0, "error": None})
 WEB_PARTIAL = ("web_extract", {"urls": ["https://example.com/a", "https://example.com/b"]},
                {"results": [{"url": "https://example.com/a", "content": "x"},
                             {"url": "https://example.com/b", "content": "", "error": "HTTP 404"}]})
@@ -88,6 +99,7 @@ WEB_PARTIAL = ("web_extract", {"urls": ["https://example.com/a", "https://exampl
         pytest.param(PROC_DONE, "deploy", "ok", "self", id="waited-background-job"),
         pytest.param(WEB_PARTIAL, "network", "partial", "self", id="some-urls-failed"),
         pytest.param(BG_FAILED, "background_spawn", "error", "self", id="spawn-that-never-started"),
+        pytest.param(AGENT_RUN, "delegate_report", "ok", "subagent", id="coding-agent-launched-from-the-shell"),
         pytest.param(("terminal", {"command": "touch /tmp/pytest-of-ci/flag"}, {"output": "", "exit_code": 0, "error": None}),
                      "write", "ok", "self", id="path-named-like-a-test-runner"),
         pytest.param(("terminal", {"command": "cat /srv/deploy/config.yaml"}, {"output": "x", "exit_code": 0, "error": None}),
@@ -148,12 +160,33 @@ def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, ki
         pytest.param([DEPLOY_OK], "已重新啟動服務，設定檔也已寫入完成。", [("written", "no_write_evidence")],
                      id="evidenced-claim-does-not-hide-its-neighbour"),
         pytest.param([TEST_AND_DEPLOY], "測試通過，已部署完成。", [], id="chained-command-counts-for-each-step"),
+        # after `;` the exit status is the deploy's: the tests ran, but their result is not shown
         pytest.param([("terminal", {"command": "pytest -q; ./deploy.sh"}, {"output": "ok", "exit_code": 0, "error": None})],
-                     "測試通過，已部署完成。", [], id="semicolon-chain"),
+                     "測試通過，已部署完成。", [("tests_pass", "result_not_shown")], id="semicolon-chain"),
         pytest.param([DELEGATE], "Claude 回報資料庫已經修好。另外，新介面已經部署上線了。",
                      [("deployed", "only_subagent_report")], id="report-does-not-cover-a-new-subject"),
         pytest.param([BG_FAILED], "已部署完成。", [("deployed", "failed")], id="failed-spawn-is-a-failure"),
         pytest.param([DELEGATE], "Claude 回報已完成修改。測試都通過了。", [], id="attribution-carries-over"),
+        # a claim about a named target needs evidence about that target
+        pytest.param([ALPHA_TEST], "Beta 的測試通過了。", [("tests_pass", "target_not_shown")],
+                     id="another-projects-tests"),
+        pytest.param([ALPHA_TEST, BETA_TEST], "Beta 的測試通過了。", [], id="the-named-projects-tests"),
+        pytest.param([ALPHA_TEST], "測試通過了。", [], id="no-target-named"),
+        # the exit status must show the step's own result
+        pytest.param([SKIPPED_TEST], "Beta 的測試通過了。", [("tests_pass", "result_not_shown")],
+                     id="test-after-or-may-not-have-run"),
+        pytest.param([MASKED_TEST], "測試通過了。", [("tests_pass", "result_not_shown")], id="failure-masked-by-or"),
+        pytest.param([PIPED_TEST], "測試通過了。", [("tests_pass", "result_not_shown")], id="exit-status-of-the-pipe"),
+        # effects inside one command keep their order
+        pytest.param([TEST_THEN_EDIT], "設定已更新，測試全部通過。", [("tests_pass", "no_test_after_last_write")],
+                     id="test-then-edit-in-one-command"),
+        # a coding agent's success is its report, not our check
+        pytest.param([AGENT_RUN], "測試全部通過了。", [("tests_pass", "only_subagent_report")],
+                     id="coding-agent-report-stated-as-fact"),
+        pytest.param([AGENT_RUN], "Claude 回報測試全部通過。", [], id="coding-agent-report-attributed"),
+        pytest.param([AGENT_THEN_TEST], "測試通過了。", [], id="own-test-after-the-agent"),
+        pytest.param([TEST_OK, AGENT_RUN], "測試全部通過了。", [("tests_pass", "only_subagent_report")],
+                     id="own-test-before-the-agent-changed-things"),
     ],
 )
 def test_claims_need_evidence_of_their_own_kind(steps, answer, unsupported):

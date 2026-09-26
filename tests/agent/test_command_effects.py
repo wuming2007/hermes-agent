@@ -123,3 +123,36 @@ def test_reading_a_command_takes_linear_time(command):
 )
 def test_a_state_change_is_any_launch_migration_repo_change_deploy_or_write(command, changes):
     assert command_changes_state(command) is changes
+
+
+@pytest.mark.parametrize(
+    "command, outcomes",
+    [
+        pytest.param("pytest -q", [("pytest -q", True)], id="single"),
+        pytest.param("pytest -q && ./deploy.sh", [("pytest -q", True), ("./deploy.sh", True)], id="and-chain"),
+        pytest.param("true || pytest tests/test_beta.py", [("true", False), ("pytest tests/test_beta.py", False)],
+                     id="or-may-have-skipped"),
+        pytest.param("pytest -q || true", [("pytest -q", False), ("true", False)], id="or-masks-a-failure"),
+        pytest.param("(false || make) && pytest -q", [("false", False), ("make", False), ("pytest -q", False)],
+                     id="subshell-shows-nothing"),
+        pytest.param("pytest -q 2>&1 | tail -5", [("pytest -q 2>&1", False), ("tail -5", True)],
+                     id="pipe-shows-its-last-command"),
+        pytest.param("set -o pipefail; pytest -q | tee log.txt",
+                     [("set -o pipefail", False), ("pytest -q", True), ("tee log.txt", True)], id="pipefail"),
+        pytest.param("pytest -q; ./deploy.sh", [("pytest -q", False), ("./deploy.sh", True)],
+                     id="semicolon-shows-the-last"),
+        pytest.param("set -e; pytest -q; ./deploy.sh", [("set -e", True), ("pytest -q", True), ("./deploy.sh", True)],
+                     id="errexit"),
+        pytest.param("make build || make fallback && pytest -q",
+                     [("make build", False), ("make fallback", False), ("pytest -q", True)], id="left-associative"),
+        pytest.param("bash -c 'cd app && pytest -q'", [("cd app", True), ("pytest -q", True)], id="nested-shell"),
+        pytest.param("timeout 300 pytest -q", [("pytest -q", True)], id="wrapper-peeled"),
+        pytest.param("pytest -q &", [("pytest -q", False)], id="background"),
+        pytest.param("cat <<EOF > notes.txt\nhello\nEOF", [("cat <<EOF > notes.txt", False), ("hello", False),
+                                                          ("EOF", False)], id="here-document-shows-nothing"),
+    ],
+)
+def test_what_an_exit_status_of_zero_shows(command, outcomes):
+    from agent.command_effects import step_outcomes
+
+    assert list(step_outcomes(command)) == outcomes

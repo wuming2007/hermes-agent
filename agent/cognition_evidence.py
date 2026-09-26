@@ -41,6 +41,9 @@ class EvidenceItem:
     index: int  # message index of the result row
     kinds: frozenset = frozenset()  # every kind the call covered: `pytest && ./deploy.sh` is test and deploy
     text: str = field(default="", repr=False, compare=False)  # the result as the model saw it
+    # What the call did, in order: (kind, whether its status shows that step succeeded). A shell
+    # line is one step per command; `pytest || true` ran the tests but its exit 0 shows nothing.
+    steps: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -101,7 +104,6 @@ _COMMAND_KINDS = (
         r"|git\s+(?:status|diff|log|show|branch|remote|rev-parse))\b")),
 )
 _LEADING_CD = re.compile(r"^\s*(?:cd\s+\S+\s*&&\s*)*")
-_CHAIN = re.compile(r"\s*(?:&&|\|\||;)\s*")
 _PROCESS_REPORT_ACTIONS = frozenset({"poll", "wait", "log"})
 _PROCESS_ACTION_KINDS = {"list": "read"}
 
@@ -116,12 +118,6 @@ def matching_command_kinds(command: str) -> frozenset:
     """Every kind whose pattern matches a shell command (``command_kind`` keeps only the first)."""
     command = _LEADING_CD.sub("", command or "")
     return frozenset(kind for kind, pattern in _COMMAND_KINDS if pattern.search(command))
-
-
-def _command_kinds(command: str) -> frozenset:
-    """The kind of the whole command plus the kind of each chained step."""
-    steps = [step for step in _CHAIN.split(_LEADING_CD.sub("", command or "")) if step]
-    return frozenset({command_kind(command), *(command_kind(step) for step in steps)})
 
 
 def _error_text(data: dict, raw: str) -> str:
@@ -198,25 +194,46 @@ def _unwrap(name: str, args: dict) -> tuple[str, dict]:
     return name, args
 
 
-def _kinds(name: str, args: dict, data: dict, command: str) -> tuple[str, frozenset]:
-    """The call's primary kind and every kind it covered. A process_manage poll/wait/log speaks
-    for its job's command; kill/write/submit only act on the job."""
+# Shell bookkeeping: these commands change nothing a claim could be about.
+_NEUTRAL_WORDS = frozenset({"cd", "pushd", "popd", "export", "unset", "set", "alias", "true", "false", ":", "sleep",
+                            "wait", "shopt", "trap", "umask"})
+
+
+def _shell_steps(command: str) -> tuple[tuple[str, bool], ...]:
+    """A command line's effects in order, each with whether the line's exit status 0 shows it
+    succeeded. A coding agent's run is that agent's report, not our own check."""
+    from agent.command_effects import is_agent_run, step_outcomes  # command_effects imports this module
+
+    steps = []
+    for step, shown in step_outcomes(command):
+        if step.split(None, 1)[0] in _NEUTRAL_WORDS:
+            continue
+        steps.append(("delegate_report" if is_agent_run(step) else command_kind(step), shown))
+    return tuple(steps)
+
+
+def _kinds(name: str, args: dict, data: dict, command: str) -> tuple[str, frozenset, tuple]:
+    """The call's primary kind, every kind it covered, and its steps. A process_manage
+    poll/wait/log speaks for its job's command; kill/write/submit only act on the job."""
     report = name == "process_manage" and args.get("action") in _PROCESS_REPORT_ACTIONS
     if name == "terminal" and (args.get("background") or data.get("output") == "Background process started"):
-        return "background_spawn", frozenset({"background_spawn"}) | _command_kinds(command)
+        steps = (("background_spawn", False), *((kind, False) for kind, _shown in _shell_steps(command)))
+        return "background_spawn", frozenset(kind for kind, _shown in steps), steps
     if name == "process_manage" and not report:
         kind = _PROCESS_ACTION_KINDS.get(str(args.get("action")), "exec")
     elif command and (name == "terminal" or report):
-        return command_kind(command), _command_kinds(command)
+        steps = _shell_steps(command) or (("exec", True),)
+        kinds = frozenset(kind for kind, _shown in steps)
+        return ("delegate_report" if kinds == {"delegate_report"} else command_kind(command)), kinds, steps
     else:
         kind = _TOOL_KINDS.get(name, "exec")
-    return kind, frozenset({kind})
+    return kind, frozenset({kind}), ((kind, True),)
 
 
 def _classify(call_id: str, name: str, args: dict, raw: str, index: int) -> EvidenceItem:
     data = _as_dict(raw)
     command = str(args.get("command") or data.get("command") or "")
-    kind, kinds = _kinds(name, args, data, command)
+    kind, kinds, steps = _kinds(name, args, data, command)
     status_of = _STATUS_BY_TOOL.get(name) if data else None
     status = status_of(data, raw) if status_of else _generic_status(name, data, raw)
     if kind == "background_spawn" and status == "ok":
@@ -224,9 +241,12 @@ def _classify(call_id: str, name: str, args: dict, raw: str, index: int) -> Evid
     urls = args.get("urls")
     target = (args.get("path") or command or args.get("goal") or args.get("url")
               or (urls[0] if isinstance(urls, list) and urls else "") or args.get("query") or "")
+    if args.get("workdir"):
+        target = f"{target} (in {args['workdir']})"
     return EvidenceItem(
         evidence_id=f"e_{call_id}", tool_name=name, kind=kind, status=status, target=str(target),
         provenance="subagent" if kind == "delegate_report" else "self", index=index, kinds=kinds, text=raw,
+        steps=steps,
     )
 
 
@@ -248,10 +268,11 @@ _NOTICE_STATUS = re.compile(r"^Status: (?P<status>\w+)", re.MULTILINE)
 
 def _job_notice(match: re.Match, text: str, index: int) -> EvidenceItem:
     command = match["cmd"].strip()
+    steps = _shell_steps(command) or (("exec", True),)
     return EvidenceItem(
         evidence_id=f"e_notice_{match['sid']}_{index}", tool_name="process_notice", kind=command_kind(command),
         status={0: "ok", 124: "timeout"}.get(int(match["exit"]), "error"), target=command, provenance="self",
-        index=index, kinds=_command_kinds(command), text=text,
+        index=index, kinds=frozenset(kind for kind, _shown in steps), text=text, steps=steps,
     )
 
 
@@ -262,6 +283,7 @@ def _delegation_notice(match: re.Match, text: str, index: int) -> EvidenceItem:
         evidence_id=f"e_delegation_{match['sid']}_{index}", tool_name="delegation_notice", kind="delegate_report",
         status=states.pop() if len(states) == 1 else "partial", target=goal["goal"].strip() if goal else "",
         provenance="subagent", index=index, kinds=frozenset({"delegate_report"}), text=text,
+        steps=(("delegate_report", True),),
     )
 
 
@@ -334,44 +356,128 @@ SUPPORT = {
 _SHELL_TOOLS = {"terminal": "shell", "process_manage": "shell", "process_notice": "shell"}
 _STATUS_REASONS = {"timeout": "timeout", "running": "still_running", "error": "failed", "blocked": "blocked",
                    "partial": "partial"}
+# Every reason ``check_claims`` gives for an unsupported claim.
+UNSUPPORTED_REASONS = frozenset({
+    *_STATUS_REASONS.values(), "only_subagent_report", "result_not_shown", "target_not_shown",
+    *(s.missing for s in SUPPORT.values()), *(s.stale for s in SUPPORT.values() if s.stale),
+})
+# A coding agent or subagent may have changed files, so a check before its run is stale too.
+_WRITE_LIKE = frozenset({"write", "delegate_report"})
 _Verdict = tuple[bool, str, tuple[str, ...]]
 
 
-def _subagent_verdict(claim: StateClaim, reports: list[EvidenceItem]) -> _Verdict:
+@dataclass(frozen=True)
+class _Effect:
+    """One step of one tool result, in the turn's order."""
+    item: EvidenceItem
+    step: int
+    kind: str
+    shown: bool  # the result's status shows this step succeeded
+
+    @property
+    def position(self) -> tuple[int, int]:
+        return self.item.index, self.step
+
+
+def _effects(items: Sequence[EvidenceItem]) -> list[_Effect]:
+    return [_Effect(item, i, kind, shown) for item in items
+            for i, (kind, shown) in enumerate(item.steps or ((item.kind, True),))]
+
+
+def _may_have_run(effect: _Effect) -> bool:
+    """A blocked call did nothing; a failed shell line or subagent may have got as far as the write."""
+    status = effect.item.status
+    partial_run = effect.item.tool_name in _SHELL_TOOLS or effect.kind == "delegate_report"
+    return status == "ok" or (partial_run and status in ("error", "timeout", "partial", "running"))
+
+
+# Words a claim uses for the work in general, or for its tools and helpers; anything else it names
+# (Beta, parser.py, v2.1) is what the claim is about, and the evidence has to be about it too.
+_GENERIC_WORDS = frozenset("""
+the and for with from that this these those into onto its our your their has have had been are was were
+will can all now just also still again already both each every some any more most new old then than not
+test tests testing tested pass passed passes passing suite unit units integration e2e lint lints type types
+typecheck check checks checked verify verified verification deploy deployed deployment release released
+production prod staging live run ran runs running work works worked working done complete completed finish
+finished success successful successfully fix fixed fixes fixing update updated updates change changed changes
+build builds built green red okay issue issues bug bugs error errors warning warnings problem problems
+server api app apps service services site page pages database backend frontend code repo repository branch
+main master project projects module modules package packages function functions class classes feature
+features endpoint endpoints job jobs script scripts command commands tool tools system version config configs
+setting settings environment env output outputs result results log logs data file files folder directory dir
+written write wrote saved save created create added add removed remove edited edit
+pytest npm pnpm yarn jest vitest mocha tox make cargo go unittest playwright
+claude codex gemini aider opencode cursor hermes gpt chatgpt copilot agent agents subagent bot assistant model
+""".split())
+_TARGET_WORD = re.compile(r"[A-Za-z_][\w.\-/]{2,}", re.ASCII)
+
+
+def _claim_targets(sentence: str) -> frozenset:
+    """What a claim names (a project, file, module, version), lower-cased."""
+    words = (word.lower().strip(".-/") for word in _TARGET_WORD.findall(sentence or ""))
+    return frozenset(word for word in words if len(word) >= 3 and word not in _GENERIC_WORDS)
+
+
+def _mentions(item: EvidenceItem, targets: frozenset) -> bool:
+    """Whether a result's call or output names one of the claim's targets."""
+    haystack = f"{item.target}\n{item.text}".lower()
+    return any(target in haystack for target in targets)
+
+
+def _subagent_verdict(claim: StateClaim, reports: list[_Effect]) -> _Verdict:
     last = reports[-1]
-    if last.status != "ok":
-        return False, _STATUS_REASONS[last.status], (last.evidence_id,)
-    return (True, "", (last.evidence_id,)) if claim.attributed else (False, "only_subagent_report", (last.evidence_id,))
+    ids = (last.item.evidence_id,)
+    if last.item.status != "ok":
+        return False, _STATUS_REASONS[last.item.status], ids
+    if not last.shown:
+        return False, "result_not_shown", ids
+    return (True, "", ids) if claim.attributed else (False, "only_subagent_report", ids)
 
 
-def _check_universal(claim: StateClaim, items: Sequence[EvidenceItem]) -> _Verdict:
-    latest = {(_SHELL_TOOLS.get(e.tool_name, e.tool_name), e.target): e for e in items if e.kind in _ACTION_KINDS}
+def _check_universal(claim: StateClaim, effects: list[_Effect], targets: frozenset) -> _Verdict:
+    actions = [e for e in effects if e.kind in _ACTION_KINDS]
+    about = [e for e in actions if not targets or _mentions(e.item, targets)]
+    if actions and not about:
+        return False, "target_not_shown", ()
+    latest: dict[tuple[str, str], EvidenceItem] = {}
+    for effect in about:
+        latest[(_SHELL_TOOLS.get(effect.item.tool_name, effect.item.tool_name), effect.item.target)] = effect.item
     for status in ("timeout", "running", "error", "blocked", "partial"):
-        stuck = [e.evidence_id for e in latest.values() if e.status == status]
+        stuck = [item.evidence_id for item in latest.values() if item.status == status]
         if stuck:
             return False, _STATUS_REASONS[status], tuple(stuck)
-    done = [e.evidence_id for e in items if e.kind in _ACTION_KINDS and e.provenance == "self" and e.status == "ok"]
-    if done:
-        return True, "", tuple(done[-5:])
-    reports = [e for e in items if e.provenance == "subagent"]
+    own = [e for e in about if e.kind != "delegate_report" and e.item.provenance == "self"
+           and e.item in latest.values() and e.item.status == "ok"]
+    unshown = [e.item.evidence_id for e in own if not e.shown]
+    if unshown:
+        return False, "result_not_shown", tuple(dict.fromkeys(unshown))
+    if own:
+        return True, "", tuple(dict.fromkeys(e.item.evidence_id for e in own))[-5:]
+    reports = [e for e in about if e.kind == "delegate_report"]
     return _subagent_verdict(claim, reports) if reports else (False, "no_action_evidence", ())
 
 
 def _check(claim: StateClaim, items: Sequence[EvidenceItem]) -> _Verdict:
     support = SUPPORT[claim.claim_class]
+    effects, targets = _effects(items), _claim_targets(claim.sentence)
     if support.universal:
-        return _check_universal(claim, items)
-    last_write = max((e.index for e in items if e.kind == "write" and e.status == "ok"), default=None)
-    candidates = [
-        e for e in items if e.provenance == "self" and e.kinds & support.kinds
-        and (not support.after_last_write or last_write is None or e.index > last_write)
+        return _check_universal(claim, effects, targets)
+    last_write = max((e.position for e in effects if e.kind in _WRITE_LIKE and _may_have_run(e)), default=None)
+    relevant = [
+        e for e in effects if e.item.provenance == "self" and e.kind in support.kinds - {"delegate_report"}
+        and (not support.after_last_write or last_write is None or e.position > last_write)
     ]
-    if candidates:
-        landed = [e for e in candidates if e.status == "ok"]
-        chosen = landed[-1] if support.any_landed and landed else candidates[-1]
-        reason = "" if chosen.status == "ok" else _STATUS_REASONS[chosen.status]
-        return chosen.status == "ok", reason, (chosen.evidence_id,)
-    reports = [e for e in items if e.provenance == "subagent"]
+    if relevant:
+        about = [e for e in relevant if not targets or _mentions(e.item, targets)]
+        if not about:
+            return False, "target_not_shown", ()
+        landed = [e for e in about if e.item.status == "ok" and e.shown]
+        chosen = landed[-1] if support.any_landed and landed else about[-1]
+        ids = (chosen.item.evidence_id,)
+        if chosen.item.status != "ok":
+            return False, _STATUS_REASONS[chosen.item.status], ids
+        return (True, "", ids) if chosen.shown else (False, "result_not_shown", ids)
+    reports = [e for e in effects if e.kind == "delegate_report"]
     if reports:
         return _subagent_verdict(claim, reports)
     stale = support.after_last_write and last_write is not None

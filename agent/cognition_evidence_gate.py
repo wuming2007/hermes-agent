@@ -42,6 +42,9 @@ REASON_TEXT = {
     "no_deploy_evidence": ("no deploy or restart ran this turn", "本輪沒有部署或重啟"),
     "no_write_evidence": ("no file was written this turn", "本輪沒有寫入檔案"),
     "no_action_evidence": ("no tool action ran this turn", "本輪沒有任何工具動作"),
+    "result_not_shown": ("the command's exit status does not show that step's own result",
+                         "指令的結束碼看不出這一步本身的結果"),
+    "target_not_shown": ("no result shows it concerns what the answer names", "看不出有結果是針對所說的對象"),
 }
 
 

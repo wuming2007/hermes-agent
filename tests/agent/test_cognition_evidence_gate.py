@@ -146,9 +146,7 @@ def test_check_round_stops_at_its_call_budget():
 
 
 def test_every_unsupported_reason_has_words_for_the_model_and_the_user():
-    from agent.cognition_evidence import SUPPORT, _STATUS_REASONS
+    from agent.cognition_evidence import UNSUPPORTED_REASONS
     from agent.cognition_evidence_gate import REASON_TEXT
 
-    reasons = {*_STATUS_REASONS.values(), "only_subagent_report",
-               *(s.missing for s in SUPPORT.values()), *(s.stale for s in SUPPORT.values() if s.stale)}
-    assert reasons <= set(REASON_TEXT)
+    assert UNSUPPORTED_REASONS <= set(REASON_TEXT)

@@ -57,9 +57,9 @@ _WRAPPER = re.compile(
 _QUOTED = {"'": re.compile(r"'([^']*)'"), '"': re.compile(r'"((?:[^"\\]|\\.)*)"')}
 
 
-def _split(command: str) -> list[str]:
-    """The simple commands of a command line."""
-    steps: list[str] = []
+def _scan(command: str) -> list[tuple[str, str]]:
+    """The simple commands of a command line, each with the operator that follows it ('' last)."""
+    parts: list[tuple[str, str]] = []
     current: list[str] = []
     in_double = False
     i = 0
@@ -79,14 +79,19 @@ def _split(command: str) -> list[str]:
             in_double = not in_double
         separator = _SUBSTITUTION.match(command, i) or (None if in_double else _SEPARATOR.match(command, i))
         if separator:
-            steps.append("".join(current))
+            parts.append(("".join(current).strip(), separator.group()))
             current = []
             i = separator.end()
             continue
         current.append(char)
         i += 1
-    steps.append("".join(current))
-    return [step.strip() for step in steps if step.strip()]
+    parts.append(("".join(current).strip(), ""))
+    return parts
+
+
+def _split(command: str) -> list[str]:
+    """The simple commands of a command line."""
+    return [step for step, _op in _scan(command) if step]
 
 
 def _peel(step: str) -> str:
@@ -124,9 +129,10 @@ _IN_PLACE = re.compile(r"^(?:\S*/)?(?:perl|ruby)\b.*?\s-[a-zA-Z]*i", re.S)
 _INLINE = re.compile(
     r"^(?:\S*/)?(?:python[\d.]*|pypy[\d.]*|node(?:js)?|bun|deno|ruby|perl|php|osascript|lua|Rscript)\b"
     r"(?:\s+-[\w-]+(?:=\S+)?)*?\s+(?:-[a-zA-Z]*[ceEr]|--eval|eval)\s+(?P<body>.+)", re.S)
-_AGENT = re.compile(
-    r"^(?:\S*/)?(?:claude(?:-code)?|codex|opencode(?:-ai)?|aider(?:-chat)?|gemini(?:-cli)?|cursor-agent)(?![\w.-])"
-    r"|^(?:\S*/)?hermes\s+chat\b|^tmux\s+send-keys\b")
+_AGENT_CLI = (r"^(?:\S*/)?(?:claude(?:-code)?|codex|opencode(?:-ai)?|aider(?:-chat)?|gemini(?:-cli)?|cursor-agent)"
+              r"(?![\w.-])|^(?:\S*/)?hermes\s+chat\b")
+_AGENT_RUN = re.compile(_AGENT_CLI)  # an agent that works and reports back
+_AGENT = re.compile(_AGENT_CLI + r"|^tmux\s+send-keys\b")  # also keys typed into a running agent
 _MIGRATION = re.compile(
     r"^(?:\S*/)?(?:alembic|flyway|liquibase)\b|\bmanage\.py\s+migrate\b|^(?:\S*/)?prisma\s+migrate\b|\bdb:migrate\b")
 _GIT = r"^(?:\S*/)?git(?:\s+(?:-[Cc]\s*\S+|--[\w-]+(?:=\S+)?))*\s+"
@@ -279,3 +285,81 @@ def code_effects(code: str) -> frozenset:
     """What an inline script (``python -c``, ``node -e``, ``execute_code``) would change: file writes
     by their calls, and the commands it spawns read like any command line."""
     return _code_effects(code or "", 0)
+
+
+# -- what an exit status of 0 shows ---------------------------------------------------------------
+
+_LIST_OPS = frozenset({";", "\n", "&"})
+_OPAQUE_OPS = frozenset({"(", ")", "$(", "`"})
+_ERREXIT = re.compile(r"^set\s+(?:-\w*e\w*|-o\s+errexit)\b")
+_PIPEFAIL = re.compile(r"^set\s+(?:-\w+\s+)*-o\s+pipefail\b|^set\s+-\w*o\w*\s+pipefail\b")
+
+
+def _and_or_confirmed(pipelines: list[list[int]], ops: list[str], pipefail: bool) -> set[int]:
+    """Steps of one ``&&``/``||`` list whose success its status 0 shows. The list is left-associative:
+    ``… && last`` shows ``last`` and whatever the part before shows; ``… || last`` shows nothing, since
+    ``last`` ran only if the part before failed. A pipeline shows its last command (all under pipefail)."""
+    shown: set[int] = set()
+    i = len(pipelines) - 1
+    while True:
+        if i > 0 and ops[i - 1] != "&&":
+            return shown
+        shown.update(pipelines[i] if pipefail else pipelines[i][-1:])
+        if i == 0:
+            return shown
+        i -= 1
+
+
+def _confirmed(parts: list[tuple[str, str]]) -> set[int]:
+    """Positions in ``parts`` whose success an exit status of 0 for the whole line shows."""
+    steps = [(position, step, op) for position, (step, op) in enumerate(parts) if step]
+    if not steps or steps[-1][2] == "&":
+        return set()  # nothing ran, or the last command runs in the background
+    errexit = any(_ERREXIT.search(step) for _position, step, _op in steps)
+    pipefail = any(_PIPEFAIL.search(step) for _position, step, _op in steps)
+    lists: list[tuple[list[list[int]], list[str]]] = [([[]], [])]
+    for position, step, op in steps:
+        pipelines, ops = lists[-1]
+        pipelines[-1].append(position)
+        if op in ("&&", "||"):
+            ops.append(op)
+            pipelines.append([])
+        elif op in _LIST_OPS:
+            lists.append(([[]], []))
+    lists = [(pipelines, ops) for pipelines, ops in lists if all(pipelines)]
+    shown: set[int] = set()
+    for pipelines, ops in (lists if errexit else lists[-1:]):  # under set -e a failing list ends the run
+        shown |= _and_or_confirmed(pipelines, ops, pipefail)
+    return shown
+
+
+def _outcomes(command: str, shown_by_caller: bool, depth: int) -> list[tuple[str, bool]]:
+    parts = _scan(command)
+    opaque = any(op in _OPAQUE_OPS for _step, op in parts) or "<<" in command
+    shown = set() if opaque or not shown_by_caller else _confirmed(parts)
+    out: list[tuple[str, bool]] = []
+    for position, (step, _op) in enumerate(parts):
+        step = _peel(step)
+        if not step:
+            continue
+        nested = _SHELL_C.search(step) or _EVAL.search(step)
+        if nested and depth < _MAX_DEPTH:
+            body, _rest = _unquote(nested["body"])
+            out.extend(_outcomes(body, position in shown, depth + 1))
+        else:
+            out.append((step, position in shown))
+    return out
+
+
+def step_outcomes(command: str) -> tuple[tuple[str, bool], ...]:
+    """The simple commands of a command line in order, each with whether an exit status of 0 for
+    the whole line shows that it ran and succeeded. Only the last command of a pipeline (unless
+    ``set -o pipefail``), and only along the trailing ``&&`` chain of the final list (every list
+    under ``set -e``): ``a || b`` shows neither, ``a; b`` shows only ``b``. A nested ``bash -c`` is
+    followed inside; subshells, substitutions and here-documents show nothing."""
+    return tuple(_outcomes(command or "", True, 0))
+
+
+def is_agent_run(step: str) -> bool:
+    """Whether a simple command runs a coding agent, whose output is that agent's own report."""
+    return bool(_AGENT_RUN.search(_peel(step)))
