@@ -4,6 +4,7 @@
     hermes cognition lessons show ID                              one lesson and what it rests on
     hermes cognition lessons confirm ID | revoke ID               your own word on a lesson
     hermes cognition lessons forget ID | --all [--all-projects]   delete for good
+    hermes cognition track-record [--all-projects] [--reset]      claimed results and how they held up
 
 Runs outside any turn: the project is the current directory's, the profile the active one. Your
 word here counts as yours, the same as saying it in a chat. No model tool is involved.
@@ -15,10 +16,10 @@ import argparse
 import time
 from typing import Callable, Optional
 
-from plugins.cognition_wm import runtime
-from plugins.cognition_wm.learning import support_label
+from plugins.cognition_wm import calibration, runtime
 from plugins.cognition_wm.model import EXPERIENCE_STATUSES, Experience, SourceRef
 from plugins.cognition_wm.provenance import RUN_ID
+from plugins.cognition_wm.recall import support_label
 from plugins.cognition_wm.store import WorkingMemoryError
 
 
@@ -30,6 +31,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     lessons.add_argument("--all-projects", action="store_true", help="every project, not just this one")
     lessons.add_argument("--status", choices=EXPERIENCE_STATUSES, help="only lessons in this state")
     lessons.add_argument("--all", action="store_true", help="with forget: every lesson (of this project)")
+    record = subs.add_parser("track-record", help="Claimed results per task kind, executor, model and version")
+    record.add_argument("--all-projects", action="store_true", help="every project, not just this one")
+    record.add_argument("--reset", action="store_true", help="delete the recorded results (of this project)")
 
 
 def _yours() -> SourceRef:
@@ -138,12 +142,28 @@ def _lessons(args: argparse.Namespace) -> int:
     return _LESSON_OPS[args.op](args)
 
 
-_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {"lessons": _lessons}
+def _track_record(args: argparse.Namespace) -> int:
+    wm = runtime.store()
+    project = None if args.all_projects else runtime.project_key()
+    if args.reset:
+        print(f"Deleted {wm.forget_outcomes(project_key=project)} recorded result(s).")
+        return 0
+    found = wm.outcomes(project_key=project)
+    if not found:
+        print("No results recorded here yet.")
+        return 0
+    print(f"Track record, {'every project' if project is None else 'this project'} (never pooled across models or "
+          "versions):")
+    print("\n".join(calibration.describe(found, min_samples=int(runtime.settings().calibration_min_samples))))
+    return 0
+
+
+_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {"lessons": _lessons, "track-record": _track_record}
 
 
 def cognition_command(args: argparse.Namespace) -> int:
     handler = _COMMANDS.get(getattr(args, "cognition_command", None) or "")
     if handler is None:
-        print("usage: hermes cognition lessons [list|show|confirm|revoke|forget] [ID]")
+        print("usage: hermes cognition lessons [list|show|confirm|revoke|forget] [ID] | track-record [--reset]")
         return 1
     return handler(args)

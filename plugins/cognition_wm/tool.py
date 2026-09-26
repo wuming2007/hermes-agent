@@ -179,14 +179,12 @@ def _propose(spec: dict, turn: runtime.TurnState, _source) -> dict:
     situation = str(spec.get("situation") or (f'{focus.kind} task "{clip(focus.title, 60)}"' if focus else "this project"))
     said_by_model = SourceRef(type="assistant", session_id=turn.session_id, turn_id=turn.turn_id, ref="task_state",
                               at=time.time(), authored_by="model", run_id=RUN_ID)
-    from plugins.cognition_wm.learning import environment
-
     lesson = wm.add_experience(
         kind=spec.get("kind") if spec.get("kind") in EXPERIENCE_KINDS else "procedure", scope="project",
         project_key=turn.project_key, task_kind=focus.kind if focus else None, situation=situation,
         behavior=behavior, exceptions=str(spec.get("exceptions") or ""),
         tags=search_terms(f"{behavior} {situation}")[:24], lesson_key=" ".join(sorted(topic)), status="candidate",
-        origin=said_by_model, learned_under=environment(turn.notes.get("model", ""), turn.notes.get("provider", "")))
+        origin=said_by_model, learned_under=runtime.environment(turn.notes.get("model", ""), turn.notes.get("provider", "")))
     return {"experience_id": lesson.experience_id, "status": lesson.status}
 
 

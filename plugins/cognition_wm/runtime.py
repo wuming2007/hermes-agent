@@ -61,6 +61,14 @@ _chains: dict[tuple[str, str], tuple[str, ...]] = {}
 _pruned: set[str] = set()
 
 
+def environment(model: str, provider: str) -> dict:
+    """What a lesson or a result was learned under: the model, its provider and the Hermes version."""
+    from hermes_cli import __release_date__, __version__
+
+    return {"model": model or "", "provider": provider or "", "hermes_version": __version__,
+            "release_date": __release_date__}
+
+
 def home_key() -> str:
     from hermes_constants import hermes_home_key
 

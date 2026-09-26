@@ -115,12 +115,18 @@ def _texts(history: Iterable[Any]) -> Iterable[str]:
                     yield str(value)
 
 
-def for_turn(body: str, history: Sequence[Any]) -> Optional[str]:
-    """The full snapshot, or a pointer when this exact snapshot is already in the conversation."""
+def fence(tag: str, note: str, body: str, history: Sequence[Any]) -> Optional[str]:
+    """``body`` fenced as system-authored context under ``tag``, or a one-line pointer when this exact
+    body is already in the conversation (decided from the history, so compaction brings it back)."""
     if not body:
         return None
     rev = _rev(body)
-    marker = f'<working-memory rev="{rev}">'
+    marker = f'<{tag} rev="{rev}">'
     if any(marker in text for text in _texts(history)):
-        return f'<working-memory unchanged rev="{rev}"/>'
-    return f"{marker}\n{NOTE}\n{body}\n</working-memory>"
+        return f'<{tag} unchanged rev="{rev}"/>'
+    return f"{marker}\n{note}\n{body}\n</{tag}>"
+
+
+def for_turn(body: str, history: Sequence[Any]) -> Optional[str]:
+    """The full snapshot, or a pointer when this exact snapshot is already in the conversation."""
+    return fence("working-memory", NOTE, body, history)

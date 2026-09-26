@@ -16,7 +16,7 @@
 - Shell commands and ``execute_code`` scripts are read through ``agent.command_effects``, however
   they are wrapped.
 - Read-only tools, ``task_state``, ``clarify`` and Hermes's own UI tools are never gated, and
-  working-memory state is never written into long-term memory.
+  working-memory state and lessons are never written into long-term memory.
 
 Errors never block: the gate says nothing and the normal approval rules apply.
 """
@@ -87,7 +87,8 @@ _EFFECT_CLASSES = {
     AGENT_LAUNCH: "coding_agent_launch", MIGRATION: "data_migration", DEPLOY: "deploy_restart",
     REPO_CHANGE: "repo_write", FILE_WRITE: "code_change", UNKNOWN: UNKNOWN_EFFECT,
 }
-_WM_TRACE = re.compile(r"<working-memory|\bt_[0-9a-f]{12}\b|internal task state kept by Hermes")
+_WM_TRACE = re.compile(r"<working-memory|<lessons\b|\b(?:t|xp)_[0-9a-f]{12}\b|internal task state kept by Hermes"
+                       r"|lessons from earlier work")
 _STOPPED = {"paused": "paused", "cancelled": "cancelled"}
 
 
@@ -223,8 +224,8 @@ def decide(tool_name: str, args: Any, turn: runtime.TurnState, settings: runtime
 def on_pre_tool_call(*, tool_name: str = "", args: Any = None, session_id: str = "", **_: Any) -> Optional[dict]:
     try:
         if tool_name == "memory" and _WM_TRACE.search(str((args or {}).get("content") or "")):
-            return {"action": "block", "message": "BLOCKED: working-memory state is kept by Hermes and must not be "
-                                                  "stored in long-term memory."}
+            return {"action": "block", "message": "BLOCKED: working-memory state and lessons are kept by Hermes "
+                                                  "and must not be stored in long-term memory."}
         turn = runtime.current_turn(session_id)
         if turn is None:
             return None

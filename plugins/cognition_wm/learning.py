@@ -14,11 +14,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
-from plugins.cognition_wm import outcomes, runtime
+from plugins.cognition_wm import calibration, outcomes, recall, runtime
 from plugins.cognition_wm.experience_store import ExperienceStore
 from plugins.cognition_wm.lessons import LessonCue, draft_lesson, read_cue, same_topic, same_wording, says_wrong
 from plugins.cognition_wm.lessons import search_terms
@@ -40,38 +41,6 @@ class TurnLessons:
     context: str = ""
     verifier_body: str = ""
     guidance: dict = field(default_factory=dict)
-
-
-def environment(model: str, provider: str) -> dict:
-    """What a lesson or a result was learned under."""
-    from hermes_cli import __release_date__, __version__
-
-    return {"model": model or "", "provider": provider or "", "hermes_version": __version__,
-            "release_date": __release_date__}
-
-
-_SOURCE_WORDS = {"user_directive": "the user said so", "user_correction": "the user corrected this"}
-
-
-def support_label(wm: ExperienceStore, lesson: Experience) -> str:
-    """Where a lesson comes from and what backs it, in words."""
-    signals = wm.signals(lesson.experience_id)
-    summary = wm.signal_summary(lesson.experience_id)
-    if lesson.origin.authored_by == "model":
-        parts = ["suggested by the assistant"]
-    else:
-        first = next((s.source_class for s in signals if s.polarity > 0 and s.source_class in _SOURCE_WORDS),
-                     "user_directive")
-        parts = [_SOURCE_WORDS[first]]
-    if any(s.source_class == "user_confirmation" and s.polarity > 0 for s in signals):
-        parts.append("confirmed by the user")
-    if len(summary.user_lineages) > 1:
-        parts.append(f"said in {len(summary.user_lineages)} conversations")
-    if summary.verifications:
-        parts.append(f"worked in {summary.verifications} task{'s' if summary.verifications > 1 else ''}")
-    if summary.corrections:
-        parts.append(f"corrected {summary.corrections}x")
-    return " · ".join(parts)
 
 
 def _digest(text: str) -> str:
@@ -107,6 +76,9 @@ def _calls(message: Any) -> list[tuple[str, dict]]:
     return found
 
 
+_COMMAND_DIRS = re.compile(r"^\S*/(?=\S)")
+
+
 def last_turn_steps(history: Sequence[Any]) -> tuple[str, ...]:
     """The tool calls of the turn before this one ("terminal: pytest -q"), oldest first."""
     rows = [m for m in history or () if isinstance(m, dict)]
@@ -116,9 +88,21 @@ def last_turn_steps(history: Sequence[Any]) -> tuple[str, ...]:
     steps = []
     for message in rows[users[-2]:users[-1]]:
         for name, args in _calls(message):
-            target = next((str(args[k]) for k in ("command", "path", "code", "url", "query") if args.get(k)), "")
+            target = (_COMMAND_DIRS.sub("", str(args["command"])) if args.get("command") else
+                      next((str(args[k]) for k in ("path", "code", "url", "query") if args.get(k)), ""))
             steps.append(clip(f"{name}: {target}" if target else name, 80))
     return tuple(steps)
+
+
+def last_request(history: Sequence[Any]) -> str:
+    """What the user asked in the turn before this one (not a runtime note)."""
+    users = [m for m in history or () if isinstance(m, dict) and m.get("role") == "user"]
+    if len(users) < 2:
+        return ""
+    content = users[-2].get("content")
+    text = " ".join((" ".join(str(p.get("text") or "") for p in content if isinstance(p, dict))
+                     if isinstance(content, list) else str(content or "")).split())
+    return "" if text.startswith("[") else clip(text, 200)
 
 
 def _voiced(wm: ExperienceStore, lesson: Optional[Experience]) -> frozenset:
@@ -148,7 +132,7 @@ def _put_in_force_if_voiced_elsewhere(wm: ExperienceStore, lesson: Experience, o
 
 
 def _state_lesson(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue, *, focus: Optional[Task],
-                  steps: Sequence[str], shown: Sequence[str], model: str, provider: str) -> list[str]:
+                  steps: Sequence[str], request: str, shown: Sequence[str], model: str, provider: str) -> list[str]:
     """A directive or correction: said again, it counts once more; revised, it replaces the old one."""
     if cue.loosens:
         return []  # a permission, never a lesson: the task's authorization rules keep it
@@ -156,7 +140,7 @@ def _state_lesson(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue,
     source_class = "user_directive" if cue.kind == "directive" else "user_correction"
     key = f"msg:{state.lineage_root}:{_digest(cue.text)}"
     draft = draft_lesson(cue, focus_title=focus.title if focus else "", focus_kind=focus.kind if focus else None,
-                         previous_steps=steps)
+                         previous_steps=steps, previous_request=request)
     topic = frozenset(draft.lesson_key.split())
     live = [e for e in wm.experiences(project_key=state.project_key, statuses=_LIVE,
                                       include_global=draft.scope == "global") if e.scope == draft.scope]
@@ -170,7 +154,7 @@ def _state_lesson(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue,
         kind=draft.kind, scope=draft.scope, project_key=state.project_key, task_kind=focus.kind if focus else None,
         situation=draft.situation, behavior=draft.behavior, exceptions=draft.exceptions, tags=draft.tags,
         lesson_key=draft.lesson_key, status=_first_status(cue.kind, match, _voiced(wm, match), state.lineage_root),
-        origin=owner, learned_under=environment(model, provider), supersedes=match.experience_id if match else None)
+        origin=owner, learned_under=runtime.environment(model, provider), supersedes=match.experience_id if match else None)
     wm.add_signal(lesson.experience_id, source_class=source_class, polarity=1, evidence_key=key, source=owner,
                   lineage=state.lineage_root, detail=cue.text)
     if cue.kind == "correction":  # it also speaks against a lesson shown last turn that it touches
@@ -264,22 +248,37 @@ def before_turn(state: runtime.TurnState, text: str, history: Sequence[Any], *, 
 def _before_turn(state: runtime.TurnState, text: str, history: Sequence[Any], *, current: runtime.Settings,
                  model: str, provider: str) -> TurnLessons:
     wm = runtime.store()
-    if not state.owner:
-        return TurnLessons()
     focus = runtime.focus_task(state)
-    shown = _meta(wm, EXPOSED_KEY.format(state.lineage_root)).get("ids") or []
-    # A stop, pause or resume is about this task, never a lesson; a limit may also be a standing wish.
-    cue = read_cue(text) if state.intent is None or state.intent.kind == "restrict" else None
-    last = _meta(wm, LAST_TURN_KEY.format(state.lineage_root))
-    if current.calibration and last:
-        _relabel_last_turn(wm, state, last, cue, text)
-    if current.learning and cue is not None:
-        steps = last_turn_steps(history)
-        at_work = focus is not None or bool(steps)
-        if at_work or cue.kind in ("confirmation", "revoke"):
-            state.notes["lesson_notes"] = _CUE_ACTIONS[cue.kind](
-                wm, state, cue, focus=focus, steps=steps, shown=shown, model=model, provider=provider)
-    return TurnLessons()
+    notes: list[str] = []
+    if state.owner:
+        shown = _meta(wm, EXPOSED_KEY.format(state.lineage_root)).get("ids") or []
+        # A stop, pause or resume is about this task, never a lesson; a limit may also be a standing wish.
+        cue = read_cue(text) if state.intent is None or state.intent.kind == "restrict" else None
+        last = _meta(wm, LAST_TURN_KEY.format(state.lineage_root))
+        if current.calibration and last:
+            _relabel_last_turn(wm, state, last, cue, text)
+        if current.learning and cue is not None:
+            steps = last_turn_steps(history)
+            if focus is not None or steps or cue.kind in ("confirmation", "revoke"):
+                notes = _CUE_ACTIONS[cue.kind](wm, state, cue, focus=focus, steps=steps, request=last_request(history),
+                                               shown=shown, model=model, provider=provider)
+    lessons: list[Experience] = []
+    if current.learning and state.owner:
+        lessons = recall.select(wm, state, text=text, focus=focus, model=model, provider=provider,
+                                limit=int(current.lessons_max))
+        wm.set_meta(EXPOSED_KEY.format(state.lineage_root),
+                    json.dumps({"turn": state.turn_id, "ids": [lesson.experience_id for lesson in lessons]}))
+    guidance: dict = {}
+    record_lines: list[str] = []
+    if current.calibration and focus is not None:  # plain chat is never checked harder
+        guidance, record_lines = calibration.for_turn(wm, state, focus, model=model, provider=provider,
+                                                      min_samples=int(current.calibration_min_samples))
+    body = recall.render_body(wm, lessons, record_lines=record_lines, notes=notes,
+                              max_chars=int(current.lessons_max_chars))
+    if not body:
+        return TurnLessons(guidance=guidance)
+    return TurnLessons(context=recall.fence(body, history), verifier_body=f"{recall.VERIFIER_NOTE}\n{body}",
+                       guidance=guidance)
 
 
 def after_turn(*, session_id: str, turn_id: str, assistant_response: Any, history: Sequence[Any], model: str,
@@ -328,7 +327,7 @@ def _after_turn(state: runtime.TurnState, answer: str, history: Sequence[Any], *
 
 def _record(wm: ExperienceStore, state: runtime.TurnState, drafts: Sequence[outcomes.OutcomeDraft], *,
             task: Optional[Task], finished: Sequence[Task], model: str, provider: str) -> None:
-    version = environment(model, provider)["hermes_version"]
+    version = runtime.environment(model, provider)["hermes_version"]
     asked = {"asks": int(state.notes.get("asks", 0)), "blocks": int(state.notes.get("blocks", 0))}
     common = dict(session_id=state.session_id, turn_id=state.turn_id, project_key=state.project_key,
                   provider=provider or "", hermes_version=version)

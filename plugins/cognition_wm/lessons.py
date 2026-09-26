@@ -188,22 +188,26 @@ def same_wording(a: str, b: str) -> bool:
     return bool(terms_a and terms_b) and len(terms_a & terms_b) / len(terms_a | terms_b) >= 0.8
 
 
-def draft_lesson(cue: LessonCue, *, focus_title: str, focus_kind: Optional[str],
-                 previous_steps: Sequence[str]) -> LessonDraft:
+def draft_lesson(cue: LessonCue, *, focus_title: str, focus_kind: Optional[str], previous_steps: Sequence[str],
+                 previous_request: str = "") -> LessonDraft:
     """The lesson a directive or correction states: the user's own words as what to do, the
-    exception they named, where it applies, and the words it can be found by."""
+    exception they named, where it applies (the task, else what the user asked and what was done),
+    and the words it can be found by — the request's too, since a correction rarely repeats it."""
     found = _EXCEPTIONS.search(cue.text)
     exceptions = clip(found.group(0).strip(), EXCEPTIONS_MAX) if found else ""
     behavior = cue.text if not found else cue.text[:found.start()] + cue.text[found.end():]
     behavior = clip(behavior.strip(" ，,。;；"), BEHAVIOR_MAX)
     if focus_title and focus_kind:
         situation = f'{focus_kind} task "{clip(focus_title, 60)}"'
+    elif previous_request:
+        situation = f'asked "{clip(previous_request, 60)}"' + (f", after {previous_steps[0]}" if previous_steps else "")
     elif previous_steps:
         situation = "after " + "; ".join(previous_steps[:2])
     else:
         situation = "this project"
     kind = next((name for name, pattern in _KINDS if pattern.search(behavior)), "preference")
-    tags = tuple(dict.fromkeys([*search_terms(behavior), *search_terms(focus_title)]))[:TAGS_MAX]
+    tags = tuple(dict.fromkeys([*search_terms(behavior), *search_terms(focus_title),
+                                *search_terms(previous_request)]))[:TAGS_MAX]
     return LessonDraft(kind=kind, scope="global" if cue.everywhere else "project", situation=situation,
                        behavior=behavior, exceptions=exceptions, tags=tags,
                        lesson_key=" ".join(sorted(topic_terms(behavior))))
