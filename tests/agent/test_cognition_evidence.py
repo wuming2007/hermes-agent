@@ -73,6 +73,9 @@ AGENT_RUN = ("terminal", {"command": "claude -p 'run pytest and fix the failures
              {"output": "All tests pass now.", "exit_code": 0, "error": None})
 AGENT_THEN_TEST = ("terminal", {"command": "claude -p 'fix the parser' && pytest -q"},
                    {"output": "fixed\n3 passed", "exit_code": 0, "error": None})
+TASK_STATE_SHOW = ("task_state", {"action": "show"}, {"ok": True, "state": "deliverable: 報告 (done, e_1)"})
+TODO_WRITE = ("todo_list", {"todos": [{"id": "1", "content": "驗證報告", "status": "completed"}]},
+              {"todos": [{"id": "1", "content": "驗證報告", "status": "completed"}]})
 WEB_PARTIAL = ("web_extract", {"urls": ["https://example.com/a", "https://example.com/b"]},
                {"results": [{"url": "https://example.com/a", "content": "x"},
                             {"url": "https://example.com/b", "content": "", "error": "HTTP 404"}]})
@@ -185,6 +188,11 @@ def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, ki
                      id="coding-agent-report-stated-as-fact"),
         pytest.param([AGENT_RUN], "Claude 回報測試全部通過。", [], id="coding-agent-report-attributed"),
         pytest.param([AGENT_THEN_TEST], "測試通過了。", [], id="own-test-after-the-agent"),
+        # the assistant's own bookkeeping is not evidence
+        pytest.param([TASK_STATE_SHOW], "報告已經驗證過了。", [("verified", "no_check_evidence")],
+                     id="own-task-state-is-not-a-check"),
+        pytest.param([TODO_WRITE], "報告已經驗證過了。", [("verified", "no_check_evidence")],
+                     id="own-todo-list-is-not-a-check"),
         pytest.param([TEST_OK, AGENT_RUN], "測試全部通過了。", [("tests_pass", "only_subagent_report")],
                      id="own-test-before-the-agent-changed-things"),
     ],

@@ -34,7 +34,7 @@ _OBSERVATION_KINDS = frozenset({"read", "network", "exec", "test"})
 class EvidenceItem:
     evidence_id: str
     tool_name: str
-    kind: str  # read | write | exec | test | deploy | network | background_spawn | delegate_report
+    kind: str  # read | write | exec | test | deploy | network | background_spawn | delegate_report | bookkeeping
     status: str  # ok | error | blocked | timeout | running | partial
     target: str  # the path, command, URL or goal the call acted on
     provenance: str  # self | subagent
@@ -70,11 +70,15 @@ class EvidenceReport:
 # ---------------------------------------------------------------- evidence classification
 
 _NETWORK_TOOLS = frozenset({"web_extract", "web_search", "browser_navigate"})
-_READ_TOOLS = (NO_EFFECT_TOOL_NAMES | {"todo_list", "todo", "clarify", "task_state"}) - _NETWORK_TOOLS
+_READ_TOOLS = NO_EFFECT_TOOL_NAMES - _NETWORK_TOOLS
+# The assistant's own records (task state, todos, memory, its questions): what it wrote is not a
+# check of the world, so they back no claim.
+_BOOKKEEPING_TOOLS = frozenset({"task_state", "todo_list", "todo", "memory", "clarify"})
 _TOOL_KINDS = {
     **{name: "write" for name in FILE_MUTATING_TOOL_NAMES},
     **{name: "network" for name in _NETWORK_TOOLS},
     **{name: "read" for name in _READ_TOOLS},
+    **{name: "bookkeeping" for name in _BOOKKEEPING_TOOLS},
     "delegate_task": "delegate_report",
 }
 

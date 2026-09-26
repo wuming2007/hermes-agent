@@ -221,6 +221,7 @@ def _build_verification_prompt(
     candidate_response: str,
     user_message: str,
     evidence: str = "",
+    task_state: str = "",
 ) -> str:
     """Build a compact verifier prompt.
 
@@ -237,6 +238,12 @@ def _build_verification_prompt(
         "evidence or claims a state it does not show, and say that part is unverified instead of "
         f"inventing a result.\n{evidence}\n\n"
     ) if evidence else ""
+    task_block = (
+        "Task state the assistant keeps (its own bookkeeping of the work's scope, decisions, limits and "
+        "status — not the user's words and not evidence that anything was done). Do not revise the answer "
+        "for keeping to it; do not accept a claim because it is recorded here.\n"
+        f"{task_state}\n\n"
+    ) if task_state else ""
     return (
         "You are a strict consistency verifier. Compare the candidate "
         "assistant response against the user's request. If the candidate "
@@ -244,6 +251,7 @@ def _build_verification_prompt(
         "concrete factual / logical / completeness problem, reply with JSON "
         "{\"verdict\":\"revise\",\"issues\":[...],\"revised_response\":\"...\"}.\n\n"
         f"User request:\n{user_message}\n\n"
+        f"{task_block}"
         f"{evidence_block}"
         f"Candidate response:\n{candidate_response}\n\n"
         "Reply with JSON only."
@@ -279,6 +287,7 @@ def run_full_consistency_check(
     user_message: str,
     verifier: VerifierCallable,
     evidence: str = "",
+    task_state: str = "",
 ) -> VerificationResult:
     """Full guard — runs one verifier call that may rewrite the response.
 
@@ -304,7 +313,7 @@ def run_full_consistency_check(
         )
 
     prompt = _build_verification_prompt(
-        candidate_response=candidate, user_message=user_message, evidence=evidence
+        candidate_response=candidate, user_message=user_message, evidence=evidence, task_state=task_state
     )
 
     try:

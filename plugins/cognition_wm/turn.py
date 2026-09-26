@@ -60,7 +60,8 @@ def on_pre_llm_call(*, session_id: str = "", turn_id: str = "", user_message: An
         latest = _latest_instruction(state.lineage_root, text if owner else None)
         body = snapshot.render_body(state, runtime.settings(), latest_instruction=latest)
         context = snapshot.for_turn(body, conversation_history or [])
-        return {"context": context} if context else None
+        # The verifier sees no history, so it gets the whole state even when the model gets a pointer.
+        return {"context": context, "verifier_context": body} if context else None
     except Exception as exc:  # the working memory must never break a turn
         logger.warning("cognition_wm pre_llm_call failed (no snapshot this turn): %s", exc)
         return None

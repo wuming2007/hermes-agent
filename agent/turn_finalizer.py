@@ -260,6 +260,7 @@ def _run_consistency_guard(agent, final_response, route, *, user_message, meta, 
                 user_message=_user_msg_for_guard,
                 verifier=agent._default_consistency_verifier,
                 evidence=evidence_for_verifier(final_response, evidence_messages) if _show_evidence else "",
+                task_state=str(getattr(agent, "_turn_verifier_context", "") or ""),
             )
         else:
             _guard_result = None

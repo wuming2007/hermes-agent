@@ -111,3 +111,46 @@ def test_guard_notes_are_not_tool_evidence():
     telemetry = build_autonomy_telemetry_from_metadata({"mode": "deep", "verification_notes": ["claim X is unsupported"]})
 
     assert telemetry.evidence_present is False
+
+
+def test_the_verifier_sees_the_task_state_as_bookkeeping_not_evidence(tmp_path, monkeypatch):
+    """Working memory keeps a one-line pointer in the model's context once its snapshot is there;
+    the verifier, which sees no history, still gets the whole task state, framed as not evidence."""
+    from hermes_cli.plugins import discover_plugins
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    def task_state(**arguments):
+        return ToolCall("tool_call", {"calls": [{"name": "task_state", "arguments": arguments}]})
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    for name in ("alpha.txt", "beta.txt"):
+        (workdir / name).write_text("x", encoding="utf-8")
+    monkeypatch.chdir(workdir)
+    answer = "之前那個資料夾裡有 alpha.txt 和 beta.txt 兩個檔案。"
+    script = [
+        task_state(action="create", title="整理資料夾", goal="列出資料夾裡的 txt 檔", kind="research",
+                   items=[{"kind": "decision", "text": "只列 txt，不動檔案"}]), Text("好。"),
+        _search(workdir), Text(answer),
+        _search(workdir), Text(answer),
+    ]
+    config = "plugins:\n  enabled: [cognition_wm]\ncognition:\n  enabled: true\n"
+    with FakeLLMServer(script, aux=_grounded_verifier) as server:
+        write_hermes_home(Path(os.environ["HERMES_HOME"]), server.base_url, extra_config=config)
+        discover_plugins(force=True)
+        db = SessionDB(db_path=tmp_path / "state.db")
+        for question in ("幫我整理資料夾", "之前那個資料夾裡有哪些 txt 檔？", "再確認一次之前那個資料夾裡有哪些 txt 檔？"):
+            agent = AIAgent(provider="custom", base_url=server.base_url, api_key="sk-fake", model="fake-model",
+                            session_db=db, session_id="sess-wm-guard", quiet_mode=True, platform="cli",
+                            enabled_toolsets=["file", "cognition_wm"], skip_context_files=True, skip_memory=True)
+            agent.run_conversation(question, conversation_history=db.get_messages_as_conversation("sess-wm-guard"))
+        last_user = [str(m.get("content") or "") for m in server.main_requests()[-1]["messages"]
+                     if m.get("role") == "user"][-1]
+        prompts = [str(r["messages"][-1].get("content") or "") for r in server.aux_requests()
+                   if "consistency verifier" in str(r["messages"][-1].get("content") or "")]
+
+    assert "<working-memory unchanged" in last_user  # the model sees only the pointer on the last turn
+    task_block = prompts[-1].partition("Candidate response:")[0]
+    assert "整理資料夾" in task_block and "只列 txt，不動檔案" in task_block
+    assert "not evidence" in task_block

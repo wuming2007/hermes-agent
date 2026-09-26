@@ -749,7 +749,10 @@ def _collect_pre_llm_call_context(
 ) -> str:
     """Run ``pre_llm_call`` plugins; their context is injected into the user message
     (never the system prompt). Oversized per-hook context is spilled to disk so a
-    runaway plugin can't inflate every subsequent turn's prompt."""
+    runaway plugin can't inflate every subsequent turn's prompt. A hook may also return
+    ``verifier_context``: reference for this turn's answer check only, never sent to the model
+    (``agent._turn_verifier_context``)."""
+    agent._turn_verifier_context = ""
     if getattr(agent, "_persist_disabled", False):
         return ""
     try:
@@ -778,6 +781,8 @@ def _collect_pre_llm_call_context(
             _spill_if_oversized = None  # type: ignore[assignment]
             _spill_config_cached = None
         _ctx_parts: list[str] = []
+        agent._turn_verifier_context = "\n\n".join(
+            str(r["verifier_context"]) for r in _pre_results if isinstance(r, dict) and r.get("verifier_context"))
         for r in _pre_results:
             if isinstance(r, dict) and r.get("context"):
                 _piece = str(r["context"])
