@@ -232,6 +232,12 @@ def _classify(call_id: str, name: str, args: dict, raw: str, index: int) -> Evid
     )
 
 
+def classify_tool_result(tool_name: str, args: Any, result: Any, tool_call_id: str = "") -> EvidenceItem:
+    """One tool result as evidence, for callers outside a message list (a ``post_tool_call`` hook)."""
+    name, arguments = _unwrap(str(tool_name or ""), _as_dict(args))
+    return _classify(str(tool_call_id or ""), name, arguments, _content_text(result), index=0)
+
+
 # A background job's exit arrives as a user-role notice (tools/process_registry_notifications.py).
 _NOTICE = re.compile(
     r"\A\[IMPORTANT: Background process (?P<sid>\S+) [^\n]*?\(exit code (?P<exit>-?\d+)[^)\n]*\)\.\n"

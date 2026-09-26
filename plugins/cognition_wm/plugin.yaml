@@ -1,0 +1,9 @@
+name: cognition_wm
+version: 0.1.0
+description: "Working memory (cognition v2): keeps each task's state, the user's limits, cancellations and permissions, and tool evidence across turns, resumed chats and compaction. The snapshot rides the current user message; the system prompt never changes mid-conversation."
+author: "Hermes cognition v2"
+provides_hooks:
+  - pre_llm_call
+  - post_tool_call
+provides_tools:
+  - task_state

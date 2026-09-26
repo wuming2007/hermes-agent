@@ -128,6 +128,14 @@ class WorkingMemoryStore:
     def close(self) -> None:
         self._conn.close()
 
+    def get_meta(self, key: str) -> Optional[str]:
+        rows = self._read("SELECT value FROM meta WHERE key=?", (key,))
+        return rows[0]["value"] if rows else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._write() as conn:
+            conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, value))
+
     @contextmanager
     def _write(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
@@ -215,10 +223,12 @@ class WorkingMemoryStore:
             if stopped and status == "active" and same_turn:
                 raise InvalidTransition(f"a task {task.status} in this turn comes back only on a later turn")
             self._bump(conn, task, expected_revision, "set_status", {"status": status, "reason": reason}, source)
+            # A cancelled or paused task keeps the focus, so the next snapshots keep saying so; a
+            # finished one hands it back.
             conn.execute(
                 "UPDATE tasks SET status=?, status_reason=?, status_source=?,"
                 " focus=CASE WHEN ? THEN 0 ELSE focus END WHERE task_id=?",
-                (status, clip(reason, ITEM_TEXT_MAX), source.to_json(), status in ENDED_STATUSES, task_id))
+                (status, clip(reason, ITEM_TEXT_MAX), source.to_json(), status in ("done", "superseded"), task_id))
         return self.task(task_id)
 
     def set_focus(self, task_id: str, *, source: SourceRef, expected_revision: Optional[int] = None) -> Task:
@@ -234,6 +244,19 @@ class WorkingMemoryStore:
             conn.execute("UPDATE tasks SET focus=0 WHERE lineage_root=? AND task_id<>?", (task.lineage_root, task_id))
             self._bump(conn, task, expected_revision, "focus", {}, source)
             conn.execute("UPDATE tasks SET focus=1 WHERE task_id=?", (task_id,))
+        return self.task(task_id)
+
+    def attach(self, task_id: str, *, lineage_root: str, source: SourceRef) -> Task:
+        """Bring an open task of another conversation into this one as its focus (owner's call)."""
+        if not source.is_owner:
+            raise ProvenanceError("attaching an earlier task is the owner's call")
+        with self._write() as conn:
+            task = self._task_in(conn, task_id)
+            if task.ended:
+                raise InvalidTransition(f"task {task_id} has ended")
+            conn.execute("UPDATE tasks SET focus=0 WHERE lineage_root=? AND task_id<>?", (lineage_root, task_id))
+            self._bump(conn, task, None, "attach", {"lineage_root": lineage_root}, source)
+            conn.execute("UPDATE tasks SET lineage_root=?, focus=1 WHERE task_id=?", (lineage_root, task_id))
         return self.task(task_id)
 
     # ------------------------------------------------------------------ items

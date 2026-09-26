@@ -2398,6 +2398,12 @@ _FALLBACK_COMMENT = """
 #     enabled: false
 #     max_rounds: 1
 #     max_extra_tool_calls: 3
+#   working_memory:              # needs plugins.enabled: [cognition_wm]
+#     snapshot_max_chars: 1600
+#     other_open_tasks_max: 3
+#     authorization_historical_after_hours: 12
+#     scope_gate: true
+#     cancelled_under_yolo: block
 """
 
 
