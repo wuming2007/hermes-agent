@@ -150,3 +150,22 @@ def test_every_unsupported_reason_has_words_for_the_model_and_the_user():
     from agent.cognition_evidence_gate import REASON_TEXT
 
     assert UNSUPPORTED_REASONS <= set(REASON_TEXT)
+
+
+def test_the_evidence_note_says_how_old_a_record_is():
+    import json
+    from types import SimpleNamespace
+
+    from agent.cognition_evidence_gate import evidence_note
+
+    agent = SimpleNamespace(_cognition_config={"evidence_loop": {"enabled": True}}, _current_cognitive_route=object())
+    record = {"success": True, "results": [{"session_id": "s_old", "when": "September 20, 2026 at 02:03 PM",
+                                            "snippet": "已部署到正式環境"}]}
+    messages = [{"role": "user", "content": "上線了嗎？"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {
+                    "name": "session_search", "arguments": json.dumps({"query": "部署"})}}]},
+                {"role": "tool", "tool_call_id": "c1", "name": "session_search", "content": json.dumps(record)}]
+
+    note = evidence_note(agent, "已經部署到正式環境了。", messages)
+
+    assert "September 20, 2026 at 02:03 PM" in note and "舊對話" in note

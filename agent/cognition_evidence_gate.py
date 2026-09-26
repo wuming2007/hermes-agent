@@ -33,6 +33,8 @@ REASON_TEXT = {
     "still_running": ("it is still running", "仍在執行，狀態未知"),
     "partial": ("it only partly succeeded", "只有部分成功"),
     "only_subagent_report": ("only a subagent's report says so", "只有子代理的回報"),
+    "only_historical_record": ("only an earlier session's record says so, which is not the current state",
+                               "只有舊對話的紀錄，不代表現在的狀態"),
     "no_test_evidence": ("no test ran this turn", "本輪沒有跑測試"),
     "no_test_after_last_write": ("the tests ran before the last change", "測試是在最後一次修改前跑的"),
     "no_functional_check": ("nothing exercised it", "沒有實際執行驗證"),
@@ -46,6 +48,14 @@ REASON_TEXT = {
                          "指令的結束碼看不出這一步本身的結果"),
     "target_not_shown": ("no result shows it concerns what the answer names", "看不出有結果是針對所說的對象"),
 }
+
+
+def _reason_words(check: ClaimCheck, chinese: bool) -> str:
+    """Why a claim is unverified, with its detail (such as when a quoted record was made)."""
+    words = REASON_TEXT[check.reason][1 if chinese else 0]
+    if not check.detail:
+        return words
+    return f"{words}（紀錄時間 {check.detail}）" if chinese else f"{words} (recorded {check.detail})"
 
 
 def evidence_loop_config(agent: Any) -> dict:
@@ -114,7 +124,7 @@ def evidence_nudge(agent: Any, final_response: Any, messages: Sequence[Any]) -> 
     claims = actionable_claims(build_evidence_report(str(final_response or ""), messages))
     if not claims:
         return None
-    listed = "\n".join(f'- {c.claim_class}: "{claim_excerpt(c, 120)}" ({REASON_TEXT[c.reason][0]})' for c in claims)
+    listed = "\n".join(f'- {c.claim_class}: "{claim_excerpt(c, 120)}" ({_reason_words(c, False)})' for c in claims)
     return (
         "[Evidence check — automated, not from the user] Your answer states results that this turn's "
         f"tool output does not show:\n{listed}\n"
@@ -153,9 +163,9 @@ def evidence_note(agent: Any, answer: str, messages: Sequence[Any]) -> str:
     if not claims:
         return ""
     if _CJK.search(answer):
-        listed = "\n".join(dict.fromkeys(f"- {claim_excerpt(c, 120)}（{REASON_TEXT[c.reason][1]}）" for c in claims))
+        listed = "\n".join(dict.fromkeys(f"- {claim_excerpt(c, 120)}（{_reason_words(c, True)}）" for c in claims))
         return f"\n\n---\n證據狀態：以下說法本輪沒有工具結果佐證，請視為未證實：\n{listed}"
-    listed = "\n".join(dict.fromkeys(f"- {claim_excerpt(c, 120)} ({REASON_TEXT[c.reason][0]})" for c in claims))
+    listed = "\n".join(dict.fromkeys(f"- {claim_excerpt(c, 120)} ({_reason_words(c, False)})" for c in claims))
     return f"\n\n---\nEvidence status: this turn's tool results do not show the following, so treat them as unverified:\n{listed}"
 
 

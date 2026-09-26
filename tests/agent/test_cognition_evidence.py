@@ -76,6 +76,10 @@ AGENT_THEN_TEST = ("terminal", {"command": "claude -p 'fix the parser' && pytest
 TASK_STATE_SHOW = ("task_state", {"action": "show"}, {"ok": True, "state": "deliverable: 報告 (done, e_1)"})
 TODO_WRITE = ("todo_list", {"todos": [{"id": "1", "content": "驗證報告", "status": "completed"}]},
               {"todos": [{"id": "1", "content": "驗證報告", "status": "completed"}]})
+OLD_SESSION = ("session_search", {"query": "部署"},
+               {"success": True, "results": [
+                   {"session_id": "s_old", "when": "September 20, 2026 at 02:03 PM", "source": "cli",
+                    "snippet": "已部署到正式環境，服務正常"}]})
 WEB_PARTIAL = ("web_extract", {"urls": ["https://example.com/a", "https://example.com/b"]},
                {"results": [{"url": "https://example.com/a", "content": "x"},
                             {"url": "https://example.com/b", "content": "", "error": "HTTP 404"}]})
@@ -193,6 +197,13 @@ def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, ki
                      id="own-task-state-is-not-a-check"),
         pytest.param([TODO_WRITE], "報告已經驗證過了。", [("verified", "no_check_evidence")],
                      id="own-todo-list-is-not-a-check"),
+        # an earlier session's record is not the current state
+        pytest.param([OLD_SESSION], "已經部署到正式環境了。", [("deployed", "only_historical_record")],
+                     id="old-record-stated-as-now"),
+        pytest.param([OLD_SESSION], "服務現在正常運作。", [("working", "only_historical_record")],
+                     id="old-record-as-working"),
+        pytest.param([OLD_SESSION], "根據上次的紀錄，已經部署到正式環境了。", [], id="old-record-cited"),
+        pytest.param([OLD_SESSION], "截至上次紀錄，已經部署到正式環境。", [], id="old-record-as-of"),
         pytest.param([TEST_OK, AGENT_RUN], "測試全部通過了。", [("tests_pass", "only_subagent_report")],
                      id="own-test-before-the-agent-changed-things"),
     ],
@@ -320,3 +331,10 @@ def test_an_async_subagent_result_is_a_subagent_report(status, reason):
 
     assert (report.evidence[-1].kind, report.evidence[-1].provenance) == ("delegate_report", "subagent")
     assert [(c.claim_class, c.reason) for c in report.unsupported] == [("tests_pass", reason)]
+
+
+def test_a_claim_resting_on_an_old_record_carries_the_records_time():
+    report = build_evidence_report("已經部署到正式環境了。", _turn(OLD_SESSION))
+
+    (claim,) = report.unsupported
+    assert claim.detail == "September 20, 2026 at 02:03 PM"

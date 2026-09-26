@@ -56,6 +56,10 @@ output cannot.
   `timeout` prefixes, `bash -c`, `eval`, `npx`, command substitution, and `python -c`/`node -e`
   one-liners. Tool calls made inside `execute_code` are gated like direct calls.
 - Working-memory state is never written into long-term memory.
+- An earlier session's record (`session_search`) says what was so then: a state claim that only
+  such a record backs is marked unverified with the record's time, unless the answer cites it
+  ("according to the last session", "as of …"). The snapshot dates the facts and finished steps it
+  carries. The assistant's own records (task state, todos, memory) are never evidence.
 - With the evidence loop on, an answer with unbacked claims gets one check round (at most
   `max_extra_tool_calls` calls: reads, test runs and commands that check something, never a write,
   repo change, deploy, migration or agent launch); claims that stay unbacked are marked as
@@ -84,7 +88,6 @@ deleting that file removes it completely.
 
 - A task, limit or permission counts only once the model records it; the snapshot and the
   approval prompt ask it to.
-- Claims read off an earlier session's records are not yet dated ("as of …").
 - Command reading is heuristic and never runs anything: code imported by a one-liner, or a command
   deliberately disguised (built from pieces at run time), can slip past it; the approval rules
   still apply to such calls.

@@ -10,6 +10,7 @@ snapshot back.
 from __future__ import annotations
 
 import hashlib
+import time
 from typing import Any, Iterable, Optional, Sequence
 
 from plugins.cognition_wm import provenance
@@ -39,14 +40,20 @@ _SHOWN_STATES = {"deliverable": {"pending", "in_progress", "done"}, "progress": 
                  "assumption": {"unverified", "refuted"}, "constraint": {"in_force"}}
 
 
+def _as_of(item: TaskItem) -> str:
+    """When the item was last recorded: a fact or a finished step is so as of then, not now."""
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(item.updated_at))
+
+
 def _item_text(item: TaskItem) -> str:
     text = clip(item.text, 120)
     if item.kind in ("deliverable", "progress"):
-        mark = {"done": "done ✓" + ",".join(item.evidence_ids[:2]) if item.evidence_ids else "done — claimed, no evidence",
-                "in_progress": "in progress", "pending": "pending"}[item.state]
+        done = ("done ✓" + ",".join(item.evidence_ids[:2]) if item.evidence_ids else "done — claimed, no evidence")
+        mark = {"done": f"{done}, as of {_as_of(item)}", "in_progress": "in progress", "pending": "pending"}[item.state]
         return f"[{mark}] {text}"
     refs = f" ({','.join(item.evidence_ids[:2])})" if item.evidence_ids else ""
-    return f"{text}{refs}" + (" [refuted]" if item.state == "refuted" else "")
+    dated = f" (as of {_as_of(item)})" if item.kind in ("fact", "assumption") else ""
+    return f"{text}{refs}{dated}" + (" [refuted]" if item.state == "refuted" else "")
 
 
 def _task_lines(task: Task, items: Sequence[TaskItem], authorizations: dict[str, str], drop_done: bool) -> list[str]:

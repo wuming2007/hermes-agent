@@ -83,7 +83,8 @@ _AFTER_CONDITION = re.compile(r"\s*(?:後|之後|以後|的話)")  # 部署完�
 _CLAUSE_BREAK = re.compile(r"[，,。；;！!？?：:\n]")
 _WINDOW = 16
 
-_ATTRIBUTION = re.compile(r"回報|表示|聲稱|指出|據|說|\b(?:reports?|reported|says|said|claims?|according to)\b",
+# Reported speech, or a claim placed at an earlier time ("截至上次紀錄", "as of").
+_ATTRIBUTION = re.compile(r"回報|表示|聲稱|指出|據|說|截至|\b(?:reports?|reported|says|said|claims?|according to|as of)\b",
                           re.IGNORECASE)
 _FIRST_PERSON = re.compile(r"我|\b(?:i|we)\b", re.IGNORECASE)
 _TOPIC_SHIFT = re.compile(r"^(?:另外|此外|還有|同時|順便|其次|最後)"

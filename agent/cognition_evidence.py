@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable, Sequence
 
 from agent.cognition_claims import StateClaim, normalize_sentence, state_claims
@@ -35,6 +36,7 @@ class EvidenceItem:
     evidence_id: str
     tool_name: str
     kind: str  # read | write | exec | test | deploy | network | background_spawn | delegate_report | bookkeeping
+    # | historical
     status: str  # ok | error | blocked | timeout | running | partial
     target: str  # the path, command, URL or goal the call acted on
     provenance: str  # self | subagent
@@ -54,6 +56,7 @@ class ClaimCheck:
     reason: str = ""
     evidence_ids: tuple[str, ...] = ()
     span: tuple[int, int] = (0, 0)  # where in ``text`` the claim is made
+    detail: str = ""  # e.g. when the earlier record a claim rests on was made
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,7 @@ _TOOL_KINDS = {
     **{name: "read" for name in _READ_TOOLS},
     **{name: "bookkeeping" for name in _BOOKKEEPING_TOOLS},
     "delegate_task": "delegate_report",
+    "session_search": "historical",  # an earlier session's record: what was so then, not what is so now
 }
 
 # First match wins, so a test that also redirects output is still a test. Runner and deploy names
@@ -362,7 +366,8 @@ _STATUS_REASONS = {"timeout": "timeout", "running": "still_running", "error": "f
                    "partial": "partial"}
 # Every reason ``check_claims`` gives for an unsupported claim.
 UNSUPPORTED_REASONS = frozenset({
-    *_STATUS_REASONS.values(), "only_subagent_report", "result_not_shown", "target_not_shown",
+    *_STATUS_REASONS.values(), "only_subagent_report", "only_historical_record", "result_not_shown",
+    "target_not_shown",
     *(s.missing for s in SUPPORT.values()), *(s.stale for s in SUPPORT.values() if s.stale),
 })
 # A coding agent or subagent may have changed files, so a check before its run is stale too.
@@ -458,7 +463,20 @@ def _check_universal(claim: StateClaim, effects: list[_Effect], targets: frozens
     if own:
         return True, "", tuple(dict.fromkeys(e.item.evidence_id for e in own))[-5:]
     reports = [e for e in about if e.kind == "delegate_report"]
-    return _subagent_verdict(claim, reports) if reports else (False, "no_action_evidence", ())
+    if reports:
+        return _subagent_verdict(claim, reports)
+    return _record_verdict(claim, effects, targets) or (False, "no_action_evidence", ())
+
+
+def _record_verdict(claim: StateClaim, effects: list[_Effect], targets: frozenset) -> _Verdict | None:
+    """A claim that only an earlier session's record backs: fine when the answer cites the record
+    ("根據上次的紀錄", "as of"), otherwise not the current state."""
+    records = [e for e in effects if e.kind == "historical" and e.item.status == "ok"
+               and (not targets or _mentions(e.item, targets))]
+    if not records:
+        return None
+    ids = tuple(dict.fromkeys(e.item.evidence_id for e in records))
+    return (True, "", ids) if claim.attributed else (False, "only_historical_record", ids)
 
 
 def _check(claim: StateClaim, items: Sequence[EvidenceItem]) -> _Verdict:
@@ -485,13 +503,33 @@ def _check(claim: StateClaim, items: Sequence[EvidenceItem]) -> _Verdict:
     if reports:
         return _subagent_verdict(claim, reports)
     stale = support.after_last_write and last_write is not None
-    return False, (support.stale if stale else support.missing), ()
+    return _record_verdict(claim, effects, targets) or (False, (support.stale if stale else support.missing), ())
+
+
+_WHEN = re.compile(r'"when":\s*"([^"]{4,60})"')
+
+
+def _record_time(items: Sequence[EvidenceItem]) -> str:
+    """When the newest earlier session a result quotes took place ('' when it does not say)."""
+    def moment(text: str) -> datetime:
+        try:
+            return datetime.strptime(text, "%B %d, %Y at %I:%M %p")
+        except ValueError:
+            return datetime.min
+    times = [when for item in items for when in _WHEN.findall(item.text)]
+    return max(times, key=moment) if times else ""
 
 
 def check_claims(answer: str, evidence: Sequence[EvidenceItem]) -> tuple[ClaimCheck, ...]:
     """Judge every state claim of the answer against evidence of its own kind."""
-    return tuple(ClaimCheck(c.sentence, c.claim_class, *_check(c, evidence), span=c.span)
-                 for c in state_claims(answer))
+    by_id = {e.evidence_id: e for e in evidence}
+    checks = []
+    for claim in state_claims(answer):
+        supported, reason, ids = _check(claim, evidence)
+        detail = _record_time([by_id[i] for i in ids if i in by_id]) if reason == "only_historical_record" else ""
+        checks.append(ClaimCheck(claim.sentence, claim.claim_class, supported, reason, ids, span=claim.span,
+                                 detail=detail))
+    return tuple(checks)
 
 
 def evidence_refs_for(sentence: str, report: EvidenceReport) -> tuple[str, ...]:

@@ -160,3 +160,25 @@ def test_the_snapshot_stays_within_its_configured_size(tmp_path, monkeypatch):
     snapshot = last[last.index("<working-memory"):]
     body = snapshot.split("\n", 2)[2].rsplit("\n</working-memory>", 1)[0]
     assert "長任務" in body and len(body) <= 400
+
+
+def test_the_snapshot_dates_what_it_carries_from_before(tmp_path, monkeypatch):
+    """A fact or a finished step shows when it was recorded, so it is cited as of then, not as now."""
+    import re
+
+    import plugins.cognition_wm.provenance as provenance
+    from plugins.cognition_wm import runtime, snapshot
+
+    monkeypatch.chdir(tmp_path)
+    turn = runtime.TurnState(session_id="s1", turn_id="t1", owner=True, project_key=runtime.project_key(),
+                             lineage_root="s1", platform="cli")
+    source = provenance.turn_source(owner=True, session_id="s1", turn_id="t1")
+    wm = runtime.store()
+    task = wm.create_task(project_key=turn.project_key, lineage_root="s1", origin_session="s1", title="上線",
+                          goal="上線新版", kind="ops", source=source)
+    wm.set_focus(task.task_id, source=source)
+    wm.add_item(task.task_id, kind="fact", text="正式環境跑 v2.3", source=source)
+
+    body = snapshot.render_body(turn, runtime.settings())
+
+    assert re.search(r"正式環境跑 v2\.3 \(as of \d{4}-\d{2}-\d{2} \d{2}:\d{2}\)", body)
