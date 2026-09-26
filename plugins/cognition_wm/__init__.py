@@ -1,14 +1,14 @@
 """Working memory for Hermes (cognition v2): task state, the user's limits and cancellations, what
 the user allowed, and tool evidence, kept across turns, resumed chats and compaction.
 
-Enable with ``plugins.enabled: [cognition_wm]``. Settings: ``cognition.working_memory`` in
-config.yaml. The snapshot rides the current user message (``pre_llm_call``); the system prompt
+Enable with ``plugins.enabled: [cognition_wm]``. Settings: ``plugins.entries.cognition_wm.settings``
+(see ``config_schema`` in plugin.yaml). The snapshot rides the current user message (``pre_llm_call``); the system prompt
 only gains a fixed usage note at session start, so the prompt cache prefix never changes.
 """
 
 from __future__ import annotations
 
-from plugins.cognition_wm import evidence_link, scope_gate, tool, turn
+from plugins.cognition_wm import evidence_link, runtime, scope_gate, tool, turn
 
 USAGE = (
     "Working memory: Hermes keeps the state of the user's work — tasks, decisions, limits, "
@@ -21,6 +21,7 @@ USAGE = (
 
 
 def register(ctx) -> None:
+    runtime.bind(ctx)
     ctx.register_hook("pre_llm_call", turn.on_pre_llm_call)
     ctx.register_hook("post_tool_call", evidence_link.on_post_tool_call)
     ctx.register_hook("pre_tool_call", scope_gate.on_pre_tool_call)

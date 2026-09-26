@@ -17,8 +17,10 @@ from plugins.cognition_wm.intents import ControlIntent
 from plugins.cognition_wm.model import Task
 from plugins.cognition_wm.store import Limits, WorkingMemoryStore
 
+# Plugin settings (plugins.entries.cognition_wm.settings, declared in plugin.yaml config_schema).
 _DEFAULTS = {"snapshot_max_chars": 1600, "other_open_tasks_max": 3, "authorization_historical_after_hours": 12,
              "scope_gate": True, "cancelled_under_yolo": "block"}
+_context = None  # the PluginContext register() received; its get_config reads the active profile's file
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,7 @@ _lock = threading.Lock()
 _stores: dict[str, WorkingMemoryStore] = {}
 _turns: dict[tuple[str, str], TurnState] = {}
 _lineage: dict[tuple[str, str], str] = {}
+_pruned: set[str] = set()
 
 
 def home_key() -> str:
@@ -54,12 +57,15 @@ def home_key() -> str:
     return hermes_home_key()
 
 
-def settings() -> Settings:
-    from hermes_cli.config import load_config_readonly
+def bind(context) -> None:
+    global _context
+    _context = context
 
-    block = ((load_config_readonly() or {}).get("cognition") or {}).get("working_memory") or {}
-    merged = {**_DEFAULTS, **(block if isinstance(block, dict) else {})}
-    return Settings(**{k: merged[k] for k in _DEFAULTS})
+
+def settings() -> Settings:
+    if _context is None:
+        return Settings()
+    return Settings(**{key: _context.get_config(key, default) for key, default in _DEFAULTS.items()})
 
 
 def store() -> WorkingMemoryStore:
@@ -102,6 +108,16 @@ def lineage_root(session_id: str) -> str:
     with _lock:
         _lineage[key] = root
     return root
+
+
+def prune_once() -> None:
+    """Apply evidence retention the first time this process touches a profile's store."""
+    key = home_key()
+    with _lock:
+        if key in _pruned:
+            return
+        _pruned.add(key)
+    store().prune_evidence()
 
 
 def remember_turn(state: TurnState) -> None:

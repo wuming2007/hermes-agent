@@ -138,8 +138,9 @@ def test_the_snapshot_stays_within_its_configured_size(tmp_path, monkeypatch):
     with FakeLLMServer(script) as server:
         work, db = _setup(tmp_path, monkeypatch, server)
         home = Path(os.environ["HERMES_HOME"])
-        write_hermes_home(home, server.base_url,
-                          extra_config=_CONFIG + "  working_memory:\n    snapshot_max_chars: 400\n")
+        write_hermes_home(home, server.base_url, extra_config=_CONFIG.replace(
+            "  enabled: [cognition_wm]\n",
+            "  enabled: [cognition_wm]\n  entries:\n    cognition_wm:\n      settings:\n        snapshot_max_chars: 400\n"))
         _agent(server, db).run_conversation("研究這些事實", conversation_history=[])
         history = db.get_messages_as_conversation("sess-wm")
         _agent(server, db).run_conversation("繼續整理", conversation_history=history)

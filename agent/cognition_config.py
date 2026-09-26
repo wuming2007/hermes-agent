@@ -52,7 +52,6 @@ _RECOGNIZED_SUB_BLOCKS: tuple[str, ...] = (
     "consistency_guard",
     "interaction_stance",
     "evidence_loop",
-    "working_memory",
 )
 
 

@@ -187,3 +187,30 @@ def test_two_processes_writing_one_task_lose_nothing():
     assert len(store.items(task.task_id)) == 30
     assert store.task(task.task_id).revision == task.revision + 30
     assert Path(store.path).exists()
+
+
+def test_an_earlier_task_is_attached_only_within_its_project():
+    store = _store()
+    here = _task(store, lineage="s-old")
+    elsewhere = _task(store, project="cwd:/other", lineage="s-old")
+
+    attached = store.attach(here.task_id, project_key="cwd:/work", lineage_root="s-new", source=_src(turn="t9"))
+    assert (attached.lineage_root, attached.focus) == ("s-new", True)
+    with pytest.raises(InvalidTransition):
+        store.attach(elsewhere.task_id, project_key="cwd:/work", lineage_root="s-new", source=_src(turn="t9"))
+    with pytest.raises(ProvenanceError):
+        store.attach(here.task_id, project_key="cwd:/work", lineage_root="s-new", source=_src("model"))
+
+
+def test_revoking_one_rule_leaves_the_others_of_its_class():
+    store = _store()
+    task = _task(store)
+    store.add_item(task.task_id, kind="authorization", text="may deploy", state="granted",
+                   attrs={"action_class": "deploy_restart"}, source=_src())
+    ask = store.add_item(task.task_id, kind="authorization", text="ask before deploying", state="ask_first",
+                         attrs={"action_class": "deploy_restart"}, source=_src())
+    assert store.effective_authorizations(task.task_id, run_id="run-a") == {"deploy_restart": "ask_first"}
+
+    store.set_item_state(ask.item_id, "revoked", source=_src())
+
+    assert store.effective_authorizations(task.task_id, run_id="run-a") == {"deploy_restart": "granted"}

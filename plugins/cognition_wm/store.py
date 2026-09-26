@@ -246,12 +246,15 @@ class WorkingMemoryStore:
             conn.execute("UPDATE tasks SET focus=1 WHERE task_id=?", (task_id,))
         return self.task(task_id)
 
-    def attach(self, task_id: str, *, lineage_root: str, source: SourceRef) -> Task:
-        """Bring an open task of another conversation into this one as its focus (owner's call)."""
+    def attach(self, task_id: str, *, project_key: str, lineage_root: str, source: SourceRef) -> Task:
+        """Bring an open task of another conversation in the same project into this one as its
+        focus (owner's call); every read is scoped by project, so a task never moves across."""
         if not source.is_owner:
             raise ProvenanceError("attaching an earlier task is the owner's call")
         with self._write() as conn:
             task = self._task_in(conn, task_id)
+            if task.project_key != project_key:
+                raise InvalidTransition(f"task {task_id} belongs to another project")
             if task.ended:
                 raise InvalidTransition(f"task {task_id} has ended")
             conn.execute("UPDATE tasks SET focus=0 WHERE lineage_root=? AND task_id<>?", (lineage_root, task_id))
@@ -339,8 +342,7 @@ class WorkingMemoryStore:
         result: dict[str, str] = {}
         for item in self.items(task_id, kinds=("authorization",)):
             if item.state == "revoked":
-                result.pop(item.attrs.get("action_class"), None)
-                continue
+                continue  # a revoked rule drops out; earlier live rules of its class still apply
             stale = item.attrs.get("run_id") != run_id or now - float(item.attrs.get("granted_at") or 0) > horizon
             result[item.attrs["action_class"]] = "historical" if item.state == "granted" and stale else item.state
         return result

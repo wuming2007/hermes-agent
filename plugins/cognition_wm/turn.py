@@ -16,7 +16,6 @@ from plugins.cognition_wm.provenance import is_owner_turn
 
 logger = logging.getLogger(__name__)
 _LATEST_KEY = "latest_instruction:{}"
-_pruned_homes: set[str] = set()
 
 
 def _current_user_row(history: Any, user_message: Any) -> dict:
@@ -57,9 +56,7 @@ def on_pre_llm_call(*, session_id: str = "", turn_id: str = "", user_message: An
             intent=detect_intent(text) if owner else None,
         )
         runtime.remember_turn(state)
-        if runtime.home_key() not in _pruned_homes:
-            _pruned_homes.add(runtime.home_key())
-            runtime.store().prune_evidence()
+        runtime.prune_once()
         latest = _latest_instruction(state.lineage_root, text if owner else None)
         body = snapshot.render_body(state, runtime.settings(), latest_instruction=latest)
         context = snapshot.for_turn(body, conversation_history or [])

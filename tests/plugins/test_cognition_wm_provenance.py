@@ -35,6 +35,12 @@ def test_owner_turns_are_the_users_own_words(message, platform, delegated, owner
     assert is_owner_turn(message, platform=platform, delegated=delegated) is owner
 
 
+def test_a_mid_turn_steer_is_the_owner_speaking():
+    from agent.prompt_builder import steer_user_row
+
+    assert is_owner_turn(steer_user_row("取消這個任務"), platform="cli", delegated=False) is True
+
+
 def test_source_refs_round_trip_and_reject_unknown_authors():
     ref = SourceRef(type="tool_result", session_id="s", turn_id="t", ref="c1", at=1.0, authored_by="tool", run_id="r")
 

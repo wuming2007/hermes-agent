@@ -19,9 +19,11 @@ RUN_ID = uuid.uuid4().hex[:12]
 
 # Openers the runtime writes into user-role rows (notices, notes, markers, handoffs) beyond the
 # ones the core check already knows. A real message rarely opens with a bracketed tag like these.
+# A mid-turn /steer row is NOT one: core delivers the user's own words in that marker, with full
+# authority (agent.prompt_builder.steer_user_row).
 _MACHINE_OPENER = re.compile(
     r"\A\s*\[(?:System|SYSTEM|Runtime|IMPORTANT|ASYNC DELEGATION|Background process|CONTEXT COMPACTION"
-    r"|Your active task list|OUT-OF-BAND)")
+    r"|Your active task list)")
 _NON_OWNER_PLATFORMS = frozenset({"cron"})
 
 

@@ -8,3 +8,25 @@ provides_hooks:
   - pre_tool_call
 provides_tools:
   - task_state
+config_schema:
+  snapshot_max_chars:
+    type: int
+    default: 1600
+    description: "Most characters of task state added to a user message."
+  other_open_tasks_max:
+    type: int
+    default: 3
+    description: "Other open tasks of the project listed in the snapshot."
+  authorization_historical_after_hours:
+    type: number
+    default: 12
+    description: "A permission older than this, or given in an earlier run, must be confirmed again."
+  scope_gate:
+    type: bool
+    default: true
+    description: "Keep execution tools inside what the user asked for."
+  cancelled_under_yolo:
+    type: str
+    choices: [block, approve]
+    default: block
+    description: "Execution tools on a paused or cancelled task: block, or ask (which /yolo skips)."

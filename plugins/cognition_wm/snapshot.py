@@ -90,7 +90,7 @@ def render_body(turn: TurnState, settings: Settings, latest_instruction: str = "
         body = "\n".join(lines)
         if len(body) <= settings.snapshot_max_chars:
             return body
-    return clip(body, settings.snapshot_max_chars)
+    return body[: settings.snapshot_max_chars - 1] + "…"  # a hard cut that keeps the lines
 
 
 def _rev(body: str) -> str:

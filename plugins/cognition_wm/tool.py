@@ -118,7 +118,8 @@ def _set_status(args: dict, turn: runtime.TurnState, source) -> dict:
 
 
 def _attach(args: dict, turn: runtime.TurnState, source) -> dict:
-    task = runtime.store().attach(str(args.get("task_id") or ""), lineage_root=turn.lineage_root, source=source)
+    task = runtime.store().attach(str(args.get("task_id") or ""), project_key=turn.project_key,
+                                  lineage_root=turn.lineage_root, source=source)
     return {"task": _task_json(task)}
 
 

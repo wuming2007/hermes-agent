@@ -23,7 +23,7 @@ class ControlIntent:
 
 _ACTIONS_ZH = r"(?:改|動|碰|修改|寄|寄出|發|發送|送出|部署|上線|推|提交|執行|跑)"
 _ACTIONS_EN = r"(?:change|modify|touch|edit|send|deploy|push|commit|run|execute)"
-_OUTPUTS_ZH = r"(?:prompt|提示詞|提示|草稿|計畫|大綱|說明|建議|文字|內容|方案)"
+_OUTPUTS_ZH = r"(?:prompt|提示詞|提示|草稿|計畫|大綱|說明|建議|方案)"
 
 # Checked in order: "不要做了" is a cancel, not a limit.
 _INTENTS: tuple[tuple[str, re.Pattern], ...] = (
@@ -35,7 +35,7 @@ _INTENTS: tuple[tuple[str, re.Pattern], ...] = (
         r"暫停|先停|先不要(?:做|動|改|繼續)|等一下再|晚點再"
         r"|\bpause\b|\bhold\s+(?:off|on)\b|\bput\s+(?:it|this)\s+on\s+hold\b", re.IGNORECASE)),
     ("restrict", re.compile(
-        rf"只要[^，。,.；;]{{0,8}}?{_OUTPUTS_ZH}|不要{_ACTIONS_ZH}|別{_ACTIONS_ZH}"
+        rf"只要[^，。,.；;]{{0,8}}?{_OUTPUTS_ZH}|不要{_ACTIONS_ZH}(?!得)|別{_ACTIONS_ZH}(?!得)"
         rf"|\b(?:only|just)\s+(?:the\s+)?(?:prompt|plan|draft|outline|text|advice)\b"
         rf"|\b(?:don'?t|do\s+not|never)\s+{_ACTIONS_EN}\b|\bwithout\s+(?:changing|touching|sending|deploying)\b",
         re.IGNORECASE)),

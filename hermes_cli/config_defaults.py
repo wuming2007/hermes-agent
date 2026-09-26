@@ -733,16 +733,6 @@ DEFAULT_CONFIG = {
             "max_rounds": 1,
             "max_extra_tool_calls": 3,
         },
-        # Settings of the cognition_wm plugin (enable it with plugins.enabled: [cognition_wm]).
-        "working_memory": {
-            "snapshot_max_chars": 1600,
-            "other_open_tasks_max": 3,
-            # A grant from an earlier run, or older than this, must be asked again.
-            "authorization_historical_after_hours": 12,
-            "scope_gate": True,
-            # What the scope gate does to execution tools on a paused/cancelled task under /yolo.
-            "cancelled_under_yolo": "block",  # block | approve
-        },
     },
 
     # Auxiliary model config — provider/model per side task. provider "auto" = auto-detect;

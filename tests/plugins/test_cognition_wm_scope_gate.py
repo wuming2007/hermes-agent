@@ -60,8 +60,7 @@ def test_a_prompt_only_request_keeps_hands_off_the_repo(tmp_path, monkeypatch, p
     fake = bin_dir / "claude"
     fake.write_text(f"#!/bin/sh\ntouch '{marker}'\necho started\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    script = [ToolCall("terminal", {"command": "claude -p 'refactor the parser'"}),
+    script = [ToolCall("terminal", {"command": f"{fake} -p 'refactor the parser'"}),
               ToolCall("write_file", {"path": "parser.py", "content": "print('x')\n"}),
               Text("這是給 Claude 的 prompt：……")]
 
