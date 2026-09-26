@@ -105,16 +105,18 @@ def _authorized(turn: runtime.TurnState, classes: tuple[str, ...], tool_name: st
         return None
     grants = runtime.store().effective_authorizations(focus.task_id, run_id=provenance.RUN_ID)
     rules = {i.attrs.get("action_class"): i.text for i in runtime.store().items(focus.task_id, kinds=("authorization",))}
-    for cls in classes:
-        state, words = grants.get(cls), rules.get(cls, "")
-        if state == "forbidden":
-            return {"action": "block", "message": f"BLOCKED: the user forbade {cls} for this task (\"{clip(words, 120)}\"), "
-                                                  f"so '{tool_name}' did not run."}
-        if state in ("ask_first", "historical"):
-            why = ("the user asked to be asked first" if state == "ask_first"
-                   else "the permission was given in an earlier session and must be confirmed again")
-            return {"action": "approve", "message": f"{cls} for task {focus.task_id}: {why} (\"{clip(words, 120)}\").",
-                    "rule_key": f"cognition:{focus.task_id}:{cls}"}
+    # A class the user forbade blocks the call, whatever other class it also exercises.
+    blocked = next((cls for cls in classes if grants.get(cls) == "forbidden"), None)
+    if blocked:
+        return {"action": "block", "message": f"BLOCKED: the user forbade {blocked} for this task "
+                                              f"(\"{clip(rules.get(blocked, ''), 120)}\"), so '{tool_name}' did not run."}
+    asked = next((cls for cls in classes if grants.get(cls) in ("ask_first", "historical")), None)
+    if asked:
+        why = ("the user asked to be asked first" if grants[asked] == "ask_first"
+               else "the permission was given before the task was stopped, or in an earlier session, and must be "
+                    "confirmed again")
+        return {"action": "approve", "rule_key": f"cognition:{focus.task_id}:{asked}",
+                "message": f"{asked} for task {focus.task_id}: {why} (\"{clip(rules.get(asked, ''), 120)}\")."}
     forbidden = next((cls for cls in _CLASS_ORDER if grants.get(cls) == "forbidden"), None)
     if UNKNOWN_EFFECT in classes and forbidden:
         return {"action": "approve", "rule_key": f"cognition:{focus.task_id}:{UNKNOWN_EFFECT}",
@@ -128,7 +130,8 @@ def _limited(turn: runtime.TurnState, tool_name: str) -> Optional[dict]:
         return None
     return {"action": "approve", "rule_key": "cognition:limit",
             "message": f"the user limited this work (\"{turn.intent.text}\"); running '{tool_name}' needs their "
-                       "confirmation."}
+                       "confirmation. Record the limit with task_state as an authorization item (forbidden or "
+                       "ask_first, with its action_class)."}
 
 
 def decide(tool_name: str, args: Any, turn: runtime.TurnState, settings: runtime.Settings) -> Optional[dict]:

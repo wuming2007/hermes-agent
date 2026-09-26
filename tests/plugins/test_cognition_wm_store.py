@@ -79,7 +79,7 @@ def test_writes_are_compare_and_set_on_the_task_revision():
     paused = store.set_status(task.task_id, "paused", source=_src(), expected_revision=task.revision)
     assert paused.revision == task.revision + 1
     with pytest.raises(RevisionConflict):
-        store.set_status(task.task_id, "done", source=_src(), expected_revision=task.revision)
+        store.set_status(task.task_id, "cancelled", source=_src(), expected_revision=task.revision)
 
 
 def test_a_cancelled_task_comes_back_only_on_a_later_owner_turn():
@@ -214,3 +214,48 @@ def test_revoking_one_rule_leaves_the_others_of_its_class():
     store.set_item_state(ask.item_id, "revoked", source=_src())
 
     assert store.effective_authorizations(task.task_id, run_id="run-a") == {"deploy_restart": "granted"}
+
+
+@pytest.mark.parametrize(
+    "stop, then",
+    [
+        pytest.param("cancelled", "done", id="cancelled-to-done"),
+        pytest.param("cancelled", "superseded", id="cancelled-to-superseded"),
+        pytest.param("cancelled", "paused", id="cancelled-to-paused"),
+        pytest.param("paused", "done", id="paused-to-done"),
+        pytest.param("paused", "active", id="paused-to-active"),
+    ],
+)
+def test_a_task_stopped_in_this_turn_stays_stopped_for_the_rest_of_the_turn(stop, then):
+    store = _store()
+    task = _task(store)
+    store.set_status(task.task_id, stop, source=_src(turn="t2"), expected_revision=None)
+
+    with pytest.raises(InvalidTransition):
+        store.set_status(task.task_id, then, source=_src(turn="t2"), expected_revision=None)
+
+    assert store.task(task.task_id).status == stop
+
+
+def test_a_stop_can_be_made_stronger_in_the_same_turn():
+    store = _store()
+    task = _task(store)
+    store.set_status(task.task_id, "paused", source=_src(turn="t2"), expected_revision=None)
+
+    assert store.set_status(task.task_id, "cancelled", source=_src(turn="t2"), expected_revision=None).status \
+        == "cancelled"
+
+
+def test_permissions_given_before_a_stop_must_be_confirmed_again_after_the_task_is_revived():
+    store = _store()
+    task = _task(store)
+    store.add_item(task.task_id, kind="authorization", text="可以推", state="granted",
+                   attrs={"action_class": "repo_write"}, source=_src(turn="t1"))
+    store.set_status(task.task_id, "cancelled", source=_src(turn="t2"), expected_revision=None)
+    store.set_status(task.task_id, "active", source=_src(turn="t3"), expected_revision=None)
+
+    assert store.effective_authorizations(task.task_id, run_id="run-a")["repo_write"] == "historical"
+
+    store.add_item(task.task_id, kind="authorization", text="可以部署", state="granted",
+                   attrs={"action_class": "deploy_restart"}, source=_src(turn="t3"))
+    assert store.effective_authorizations(task.task_id, run_id="run-a")["deploy_restart"] == "granted"

@@ -66,6 +66,7 @@ CREATE INDEX IF NOT EXISTS evidence_by_turn ON evidence(session_id, turn_id);
 CREATE INDEX IF NOT EXISTS evidence_by_task ON evidence(task_id);
 """
 _ENDED = tuple(sorted(ENDED_STATUSES))
+_STOPPED = ("paused", "cancelled")
 _TARGET_MAX, _EXCERPT_MAX = 200, 400
 
 
@@ -216,12 +217,14 @@ class WorkingMemoryStore:
             raise InvalidTransition(f"unknown status {status!r}")
         with self._write() as conn:
             task = self._task_in(conn, task_id)
-            stopped = task.status in ("paused", "cancelled")
+            stopped = task.status in _STOPPED
             if not source.is_owner and (status in OWNER_ONLY_STATUSES or stopped):
                 raise ProvenanceError(f"moving a task to {status!r} or out of {task.status!r} is the owner's call")
             same_turn = (task.status_source.session_id, task.status_source.turn_id) == (source.session_id, source.turn_id)
-            if stopped and status == "active" and same_turn:
-                raise InvalidTransition(f"a task {task.status} in this turn comes back only on a later turn")
+            # A stop made in this turn holds for the rest of it: no way out (not even through done or
+            # superseded, which would drop the focus the gate reads), only a pause made stronger.
+            if stopped and same_turn and status not in (task.status, "cancelled"):
+                raise InvalidTransition(f"a task {task.status} in this turn stays stopped until a later turn")
             self._bump(conn, task, expected_revision, "set_status", {"status": status, "reason": reason}, source)
             # A cancelled or paused task keeps the focus, so the next snapshots keep saying so; a
             # finished one hands it back.
@@ -272,6 +275,10 @@ class WorkingMemoryStore:
             evidence_ids=tuple(json.loads(row["evidence_ids"])), supersedes=row["supersedes"],
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
+
+    def item(self, item_id: str) -> Optional[TaskItem]:
+        rows = self._read("SELECT * FROM task_items WHERE item_id=?", (item_id,))
+        return self._to_item(rows[0]) if rows else None
 
     def items(self, task_id: str, kinds: Optional[Iterable[str]] = None) -> list[TaskItem]:
         rows = self._read("SELECT * FROM task_items WHERE task_id=? ORDER BY created_at, rowid", (task_id,))
@@ -334,16 +341,31 @@ class WorkingMemoryStore:
                          (state, json.dumps(merged), self._clock(), item_id))
         return self._to_item(self._read("SELECT * FROM task_items WHERE item_id=?", (item_id,))[0])
 
+    def _event_order(self, task_id: str) -> tuple[int, dict[str, int]]:
+        """(the task's latest stop event, item_id -> the latest event that set the item)."""
+        last_stop, item_events = 0, {}
+        for event in self.events(task_id):
+            payload = json.loads(event["payload"] or "{}")
+            if event["op"] == "set_status" and payload.get("status") in _STOPPED:
+                last_stop = event["event_id"]
+            elif event["op"] in ("add_item", "set_item_state"):
+                item_events[payload.get("item_id")] = event["event_id"]
+        return last_stop, item_events
+
     def effective_authorizations(self, task_id: str, *, run_id: str) -> dict[str, str]:
-        """action_class -> state, the latest item per class winning. A grant made in an earlier run
-        or longer ago than ``historical_after_hours`` is ``historical``: it must be asked again."""
+        """action_class -> state, the latest item per class winning. A grant is ``historical`` (it
+        must be asked again) when it was made in an earlier run, longer ago than
+        ``historical_after_hours``, or before the task was last paused or cancelled: bringing a
+        stopped task back does not bring back what was allowed before the stop."""
         horizon = self._limits.historical_after_hours * 3600
         now = self._clock()
+        last_stop, item_events = self._event_order(task_id)
         result: dict[str, str] = {}
         for item in self.items(task_id, kinds=("authorization",)):
             if item.state == "revoked":
                 continue  # a revoked rule drops out; earlier live rules of its class still apply
-            stale = item.attrs.get("run_id") != run_id or now - float(item.attrs.get("granted_at") or 0) > horizon
+            stale = (item.attrs.get("run_id") != run_id or now - float(item.attrs.get("granted_at") or 0) > horizon
+                     or item_events.get(item.item_id, 0) < last_stop)
             result[item.attrs["action_class"]] = "historical" if item.state == "granted" and stale else item.state
         return result
 

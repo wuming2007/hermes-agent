@@ -297,3 +297,84 @@ def test_working_memory_never_goes_into_long_term_memory(content, blocked):
                                 session_id="s-none")
 
     assert ((decision or {}).get("action") == "block") is blocked
+
+
+def test_a_stopped_task_stays_stopped_after_the_session_rotates_mid_turn(tmp_path, monkeypatch):
+    """Legacy rotating compaction (compression.in_place: false) gives the turn a new session id
+    halfway through; the gate must still know whose turn it is."""
+    import json
+
+    from hermes_cli.plugins import discover_plugins
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "parser.py").write_text("a\n", encoding="utf-8")
+    for name in ("big_a.txt", "big_b.txt"):
+        (work / name).write_text("".join(f"line {i:04d} lorem ipsum dolor sit amet consectetur adipiscing\n"
+                                         for i in range(600)), encoding="utf-8")
+    monkeypatch.chdir(work)
+    script = [
+        _task_state(action="create", title="重構 parser", goal="重構 parser", kind="engineering"), Text("好。"),
+        _task_state(action="set_status", status="cancelled", reason="使用者取消"), Text("已取消。"),
+        ToolCall("read_file", {"path": "big_a.txt"}), ToolCall("read_file", {"path": "big_b.txt"}),
+        ToolCall("write_file", {"path": "parser_v2.py", "content": "b\n"}), Text("好的。"),
+    ]
+    config = (_PLUGIN + _COGNITION + 'approvals:\n  mode: "off"\n'
+              "compression:\n  in_place: false\n  threshold_tokens: 12000\n  protect_last_n: 4\n"
+              "auxiliary:\n  title_generation:\n    enabled: false\n")
+    summary = "## Goal\nRefactor the parser.\n## Progress\n### Done\n- Read files.\n## Next Steps\n- Continue.\n"
+    tokens = lambda body: len(json.dumps(body.get("messages", []))) // 4  # noqa: E731
+    with FakeLLMServer(script, aux=lambda _r: Text(summary), prompt_tokens_fn=tokens) as server:
+        home = Path(os.environ["HERMES_HOME"])
+        write_hermes_home(home, server.base_url, extra_config=config)
+        discover_plugins(force=True)
+        db = SessionDB(db_path=home / "state.db")
+        session_id, result = "sess-rot", None
+        for message in ("幫我重構 parser", "取消這個任務", "看一下這兩個檔案"):
+            agent = AIAgent(provider="custom", base_url=server.base_url, api_key="sk-fake", model="fake-model",
+                            session_db=db, session_id=session_id, quiet_mode=True, platform="cli",
+                            enabled_toolsets=["file", "cognition_wm"], skip_context_files=True, skip_memory=True)
+            result = agent.run_conversation(message, conversation_history=db.get_messages_as_conversation(session_id))
+            session_id = agent.session_id
+
+    assert session_id != "sess-rot"  # the last turn rotated
+    assert any("BLOCKED" in str(m.get("content")) for m in result["messages"] if m.get("role") == "tool")
+    assert not (work / "parser_v2.py").exists()
+
+
+@pytest.mark.parametrize(
+    "message, recorded",
+    [
+        pytest.param("先不要做了", {"kind": "progress", "text": "讀完設定檔"}, id="stop-then-progress"),
+        pytest.param("只要給我修改計畫，不要改 repo", {"kind": "constraint", "text": "只要計畫"},
+                     id="limit-then-free-text-constraint"),
+    ],
+)
+def test_an_unrelated_record_does_not_settle_the_users_stop_or_limit(tmp_path, monkeypatch, message, recorded):
+    script = [
+        _task_state(action="create", title="重構 parser", goal="重構 parser", kind="engineering"), Text("好。"),
+        _task_state(action="add", items=[recorded]),
+        ToolCall("write_file", {"path": "parser_v2.py", "content": "b\n"}),
+        Text("好的。"),
+    ]
+
+    work, results = _run_turns(tmp_path, monkeypatch, script, ["幫我重構 parser", message], _PLUGIN + _COGNITION)
+
+    assert any("BLOCKED" in r for r in _tool_results(results[-1]))
+    assert not (work / "parser_v2.py").exists()
+
+
+def test_a_forbidden_action_is_blocked_even_when_another_class_of_the_call_is_ask_first(tmp_path, monkeypatch):
+    import plugins.cognition_wm.provenance as provenance
+    from plugins.cognition_wm import runtime, scope_gate
+
+    turn, task = _turn_with_task(tmp_path, monkeypatch, ("deploy_restart", "ask_first"))
+    runtime.store().add_item(task.task_id, kind="authorization", text="不准推 repo", state="forbidden",
+                             attrs={"action_class": "repo_write"},
+                             source=provenance.turn_source(owner=True, session_id="s1", turn_id="t1"))
+
+    decision = scope_gate.decide("terminal", {"command": "git push origin main"}, turn, runtime.settings())
+
+    assert (decision or {}).get("action") == "block"

@@ -47,7 +47,7 @@ class TurnState:
 _lock = threading.Lock()
 _stores: dict[str, WorkingMemoryStore] = {}
 _turns: dict[tuple[str, str], TurnState] = {}
-_lineage: dict[tuple[str, str], str] = {}
+_chains: dict[tuple[str, str], tuple[str, ...]] = {}
 _pruned: set[str] = set()
 
 
@@ -86,13 +86,14 @@ def project_key(*, sender_id: str = "", platform: str = "") -> str:
     return f"git:{top}" if top is not None else f"cwd:{cwd}"
 
 
-def lineage_root(session_id: str) -> str:
-    """The first session of the conversation this session continues after compaction."""
+def _compression_chain(session_id: str) -> tuple[str, ...]:
+    """The sessions this one continues through compaction, oldest first, ending with itself. A
+    session's ancestors never change, so the chain is read once per process."""
     key = (home_key(), session_id)
     with _lock:
-        if key in _lineage:
-            return _lineage[key]
-    root = session_id
+        if key in _chains:
+            return _chains[key]
+    chain: tuple[str, ...] = (session_id,)
     from hermes_constants import get_hermes_home
 
     db_path = get_hermes_home() / "state.db"
@@ -101,13 +102,17 @@ def lineage_root(session_id: str) -> str:
 
         db = SessionDB(db_path=db_path)
         try:
-            chain = db.get_compression_lineage(session_id)
+            chain = tuple(db.get_compression_lineage(session_id)) or chain
         finally:
             db.close()
-        root = chain[0] if chain else session_id
     with _lock:
-        _lineage[key] = root
-    return root
+        _chains[key] = chain
+    return chain
+
+
+def lineage_root(session_id: str) -> str:
+    """The first session of the conversation this session continues after compaction."""
+    return _compression_chain(session_id)[0]
 
 
 def prune_once() -> None:
@@ -126,8 +131,19 @@ def remember_turn(state: TurnState) -> None:
 
 
 def current_turn(session_id: Optional[str]) -> Optional[TurnState]:
+    """The live turn of a session. A rotating compaction (``compression.in_place: false``) moves a
+    turn to a child session halfway through; the child then carries on its parent's turn."""
+    home = home_key()
     with _lock:
-        return _turns.get((home_key(), session_id or ""))
+        state = _turns.get((home, session_id or ""))
+    if state is not None or not session_id:
+        return state
+    for ancestor in reversed(_compression_chain(session_id)[:-1]):
+        with _lock:
+            inherited = _turns.get((home, ancestor))
+            if inherited is not None:
+                return _turns.setdefault((home, session_id), replace(inherited, session_id=session_id))
+    return None
 
 
 def clear_intent(session_id: Optional[str]) -> None:

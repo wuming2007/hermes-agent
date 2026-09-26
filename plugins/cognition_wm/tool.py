@@ -65,14 +65,23 @@ def _task_json(task) -> dict:
     return {"task_id": task.task_id, "title": task.title, "status": task.status, "revision": task.revision}
 
 
+def _own_task(task_id: str, turn: runtime.TurnState) -> str:
+    """A task this conversation may change: its project and conversation (an earlier one comes in
+    through ``attach``), so an id seen elsewhere cannot reach another project's or chat's task."""
+    task = runtime.store().task(task_id)
+    if task is None or (task.project_key, task.lineage_root) != (turn.project_key, turn.lineage_root):
+        raise WorkingMemoryError(f"task {task_id} is not part of this conversation; attach it first")
+    return task_id
+
+
 def _focus_id(args: dict, turn: runtime.TurnState) -> str:
     task_id = str(args.get("task_id") or "")
-    if not task_id:
-        focus = runtime.focus_task(turn)
-        if focus is None:
-            raise WorkingMemoryError("no task in this conversation yet; create one first")
-        task_id = focus.task_id
-    return task_id
+    if task_id:
+        return _own_task(task_id, turn)
+    focus = runtime.focus_task(turn)
+    if focus is None:
+        raise WorkingMemoryError("no task in this conversation yet; create one first")
+    return focus.task_id
 
 
 def _add_items(task_id: str, items: list, source) -> list[str]:
@@ -104,9 +113,15 @@ def _add(args: dict, turn: runtime.TurnState, source) -> dict:
 
 
 def _update_item(args: dict, turn: runtime.TurnState, source) -> dict:
-    item = runtime.store().set_item_state(str(args.get("item_id") or ""), str(args.get("state") or ""),
-                                          source=source, evidence_ids=args.get("evidence_ids") or ())
-    return {"item": {"item_id": item.item_id, "state": item.state, "evidence_ids": list(item.evidence_ids)}}
+    wm, item_id = runtime.store(), str(args.get("item_id") or "")
+    current = wm.item(item_id)
+    if current is None:
+        raise WorkingMemoryError(f"unknown item {item_id}")
+    _own_task(current.task_id, turn)
+    item = wm.set_item_state(item_id, str(args.get("state") or ""), source=source,
+                             evidence_ids=args.get("evidence_ids") or ())
+    return {"item": {"item_id": item.item_id, "kind": item.kind, "state": item.state,
+                     "evidence_ids": list(item.evidence_ids)}}
 
 
 def _set_status(args: dict, turn: runtime.TurnState, source) -> dict:
@@ -131,6 +146,27 @@ _ACTIONS: dict[str, Callable[[dict, runtime.TurnState, Any], dict]] = {
     "create": _create, "add": _add, "update_item": _update_item, "set_status": _set_status,
     "attach": _attach, "show": _show,
 }
+_LIMITING = frozenset({"forbidden", "ask_first"})
+
+
+def _records_limit(args: dict, result: dict) -> bool:
+    """A forbid or ask-first rule was recorded: the form of a limit the scope gate enforces."""
+    added = any(i.get("kind") == "authorization" and i.get("state") in _LIMITING for i in args.get("items") or [])
+    item = result.get("item") or {}
+    return added or (item.get("kind") == "authorization" and item.get("state") in _LIMITING)
+
+
+def _sets_status(*statuses: str) -> Callable[[dict, dict], bool]:
+    return lambda args, _result: args.get("action") == "set_status" and args.get("status") in statuses
+
+
+# intent kind -> whether a successful call records it; a note about something else leaves it pending
+_SETTLES: dict[str, Callable[[dict, dict], bool]] = {
+    "cancel": _sets_status("cancelled"),
+    "pause": _sets_status("paused", "cancelled"),
+    "resume": _sets_status("active"),
+    "restrict": _records_limit,
+}
 
 
 def handle(args: dict, session_id: Optional[str] = None, **_: Any) -> str:
@@ -145,6 +181,6 @@ def handle(args: dict, session_id: Optional[str] = None, **_: Any) -> str:
         result = action(args or {}, turn, source)
     except WorkingMemoryError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
-    if action is not _show:
-        runtime.clear_intent(session_id)  # the model recorded the state the user asked for
+    if turn.intent is not None and _SETTLES[turn.intent.kind](args or {}, result):
+        runtime.clear_intent(session_id)  # the model recorded the stop or limit the user asked for
     return json.dumps({"ok": True, **result}, ensure_ascii=False)
