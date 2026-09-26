@@ -1828,7 +1828,14 @@ def fire_pre_command_hook(
         logger.debug("pre_command hook dispatch failed (non-fatal): %s", exc)
 
 
-_thread_tool_whitelist = threading.local()
+# Dispatch-side tool policy for the current turn: ``policy(tool_name, args)`` returns a denial
+# message or None. A ContextVar, not a thread-local: tools execute on worker threads started
+# through ``tools.thread_context.propagate_context_to_thread``, which carries the turn's context
+# (a thread-local never reached them, so every whitelisted fork ran its tools unrestricted). A bare
+# ``threading.Thread`` still starts without it.
+ToolPolicy = Callable[[str, Dict[str, Any]], Optional[str]]
+_thread_tool_policy: contextvars.ContextVar[Optional[ToolPolicy]] = contextvars.ContextVar(
+    "thread_tool_policy", default=None)
 
 
 @dataclass(frozen=True)
@@ -1843,12 +1850,20 @@ def set_thread_tool_whitelist(
     allowed: Optional[Set[str]],
     deny_msg_fmt: str = "Tool '{tool_name}' denied: not in this thread's tool whitelist",
 ) -> None:
-    _thread_tool_whitelist.allowed = allowed
-    _thread_tool_whitelist.fmt = deny_msg_fmt
+    if allowed is None:
+        _thread_tool_policy.set(None)
+        return
+    names = frozenset(allowed)
+    set_thread_tool_policy(lambda tool_name, _args: None if tool_name in names else deny_msg_fmt.format(tool_name=tool_name))
+
+
+def set_thread_tool_policy(policy: Optional[ToolPolicy]) -> None:
+    """Install a dispatch-side policy for tool calls made from this context (None removes it)."""
+    _thread_tool_policy.set(policy)
 
 
 def clear_thread_tool_whitelist() -> None:
-    _thread_tool_whitelist.allowed = None
+    _thread_tool_policy.set(None)
 
 
 def _get_pre_tool_call_directive_details(
@@ -1862,10 +1877,10 @@ def _get_pre_tool_call_directive_details(
     ``block`` > ``approve`` > none, not registration order: any plugin's valid veto wins over an
     earlier plugin's request for human confirmation (#87420); among approves the first valid one
     wins. Irrelevant returns are ignored."""
-    allowed = getattr(_thread_tool_whitelist, "allowed", None)
-    if allowed is not None and tool_name not in allowed:
-        fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
-        return _PreToolCallDirective(action="block", message=fmt.format(tool_name=tool_name))
+    policy = _thread_tool_policy.get()
+    denial = policy(tool_name, args if isinstance(args, dict) else {}) if policy is not None else None
+    if denial:
+        return _PreToolCallDirective(action="block", message=denial)
     from hermes_cli.lifecycle import invoke_hook as invoke_lifecycle_hook
     hook_results = invoke_lifecycle_hook(
         "pre_tool_call", tool_name=tool_name, args=args if isinstance(args, dict) else {},
