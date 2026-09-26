@@ -17,7 +17,7 @@
 
 | 程序 | 目前 | 切換時 |
 |---|---|---|
-| `ai.hermes.gateway`（default） | PID 4529，含 cron ticker、2 個 MCP 子程序 | 停止 → 新版啟動；首次開啟 `~/.hermes/state.db` 做 schema 25→30（副本實測約 48 秒） |
+| `ai.hermes.gateway`（default） | PID 78139（原 4529；9/26 11:32 測試事件後由 launchd 重啟，仍是 v0.20），含 cron ticker、MCP 子程序 | 停止 → 新版啟動；首次開啟 `~/.hermes/state.db` 做 schema 25→30（副本實測約 48 秒） |
 | `ai.hermes.gateway-tianji` / `-tianquan` / `-yuheng` | PID 4511 / 4516 / 4523 | 停止 → 新版啟動；各自 state.db 遷移 <1 秒 |
 | 互動 CLI（`~/.local/bin/hermes` → 開發 repo `.venv`，v0.20） | PID 47631、77439 | 不會被切換；建議切換前先結束，避免遷移那一分鐘遇到 database is locked。v0.20 讀寫 v30 資料庫已在副本驗證可行 |
 
@@ -97,11 +97,12 @@ grep -iE 'cognit|consistency_guard|Traceback' ~/.hermes/logs/errors.log | tail
 
 ```bash
 RT=/Users/wuming/.hermes/hermes-agent
-TS=<切換時的 TS>
+OLD=$(ls -d "$RT"/venv.v0.20-* | tail -1)          # 切換時保留的舊 venv
+echo "old venv: $OLD"                               # 必須有值才繼續
 for L in ai.hermes.gateway ai.hermes.gateway-tianji ai.hermes.gateway-tianquan ai.hermes.gateway-yuheng; do launchctl bootout gui/$(id -u)/$L; done
 while pgrep -f 'hermes_cli.main.*gateway run' >/dev/null; do sleep 1; done
 git -C "$RT" switch cognitive-stack-v0.20                                 # e6910a9
-mv "$RT/venv" "$RT/venv.v0.21.5-rollback-$TS" && mv "$RT/venv.v0.20-$TS" "$RT/venv"
+mv "$RT/venv" "$RT/venv.v0.21.5-rollback-$(date +%Y%m%d-%H%M)" && mv "$OLD" "$RT/venv"
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.gateway.plist
 for p in tianji tianquan yuheng; do launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hermes.gateway-$p.plist & done; wait
 # 若切換時改過 launcher：
