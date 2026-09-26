@@ -722,6 +722,16 @@ DEFAULT_CONFIG = {
         "consistency_guard": {
             "enabled": True,
             "deep_mode_only": True,
+            # The full verifier sees the turn's tool results, so it keeps facts read off them.
+            "evidence_context": True,
+        },
+        # Before an answer states results (deployed, tests pass, fixed, done) that the turn's
+        # tool results do not show: one read-only check round, then unverified claims are
+        # marked in the answer. Opt-in.
+        "evidence_loop": {
+            "enabled": False,
+            "max_rounds": 1,
+            "max_extra_tool_calls": 3,
         },
     },
 

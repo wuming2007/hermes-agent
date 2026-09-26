@@ -1828,12 +1828,13 @@ def fire_pre_command_hook(
         logger.debug("pre_command hook dispatch failed (non-fatal): %s", exc)
 
 
-# Dispatch-side tool policy for the current turn: ``policy(tool_name, args)`` returns a denial
-# message or None. A ContextVar, not a thread-local: tools execute on worker threads started
+# Dispatch-side tool policy for the current turn: ``policy(tool_name, args, tool_call_id)`` returns
+# a denial message or None; a call may be checked at more than one layer, so a policy that counts
+# calls keys on the id. A ContextVar, not a thread-local: tools execute on worker threads started
 # through ``tools.thread_context.propagate_context_to_thread``, which carries the turn's context
 # (a thread-local never reached them, so every whitelisted fork ran its tools unrestricted). A bare
 # ``threading.Thread`` still starts without it.
-ToolPolicy = Callable[[str, Dict[str, Any]], Optional[str]]
+ToolPolicy = Callable[[str, Dict[str, Any], str], Optional[str]]
 _thread_tool_policy: contextvars.ContextVar[Optional[ToolPolicy]] = contextvars.ContextVar(
     "thread_tool_policy", default=None)
 
@@ -1854,7 +1855,8 @@ def set_thread_tool_whitelist(
         _thread_tool_policy.set(None)
         return
     names = frozenset(allowed)
-    set_thread_tool_policy(lambda tool_name, _args: None if tool_name in names else deny_msg_fmt.format(tool_name=tool_name))
+    set_thread_tool_policy(
+        lambda tool_name, _args, _call_id: None if tool_name in names else deny_msg_fmt.format(tool_name=tool_name))
 
 
 def set_thread_tool_policy(policy: Optional[ToolPolicy]) -> None:
@@ -1878,7 +1880,7 @@ def _get_pre_tool_call_directive_details(
     earlier plugin's request for human confirmation (#87420); among approves the first valid one
     wins. Irrelevant returns are ignored."""
     policy = _thread_tool_policy.get()
-    denial = policy(tool_name, args if isinstance(args, dict) else {}) if policy is not None else None
+    denial = policy(tool_name, args if isinstance(args, dict) else {}, tool_call_id) if policy is not None else None
     if denial:
         return _PreToolCallDirective(action="block", message=denial)
     from hermes_cli.lifecycle import invoke_hook as invoke_lifecycle_hook

@@ -30,6 +30,12 @@ from agent.cognition_evidence import (
     evidence_metadata,
     evidence_refs_for,
 )
+from agent.cognition_evidence_gate import (
+    EVIDENCE_STOP_FLAG,
+    end_evidence_round,
+    evidence_loop_metadata,
+    evidence_note,
+)
 from agent.cognition_trace import build_cognition_turn_trace
 from agent.consistency_guard import (
     resolve_verification_ladder,
@@ -47,7 +53,7 @@ from agent.process_monitor import (
 # Verification-continuation nudges (verify-on-stop / pre_verify) must be stripped from
 # returned/live history to avoid role-alternation breaks; the assistant response is
 # real content and is not flagged. (#65919)
-_VERIFICATION_CONTINUATION_FLAGS = ("_verification_stop_synthetic", "_pre_verify_synthetic")
+_VERIFICATION_CONTINUATION_FLAGS = ("_verification_stop_synthetic", "_pre_verify_synthetic", EVIDENCE_STOP_FLAG)
 
 _SENTENCE_END = {".", "!", "?", "。", "！", "？", "`", ")"}
 
@@ -224,22 +230,86 @@ def _rollback_interrupted_preflight_display(agent, interrupted) -> None:
             _rollback_fn(_preflight_snapshot)
 
 
+def _revise_answer_row(messages, text) -> None:
+    """Mirror a revised answer into the transcript tail when that row carries the answer."""
+    _tail = messages[-1] if messages else None
+    if isinstance(_tail, dict) and _tail.get("role") == "assistant" and not _tail.get("tool_calls"):
+        # A promoted reasoning-only row keeps ``content`` empty and replays its
+        # ``api_content`` sidecar (#111761); revise the field the row actually uses.
+        if _tail.get("api_content") and not flatten_message_text(_tail.get("content")).strip():
+            _tail["api_content"] = text
+        else:
+            _tail["content"] = text
+
+
+def _run_consistency_guard(agent, final_response, route, *, user_message, meta, ladder, evidence_messages, logger):
+    """PR3 guard for a route that asked for verification; returns the (possibly revised) answer."""
+    try:
+        _plan = resolve_verification_plan(route)
+        _user_msg_for_guard = user_message if isinstance(user_message, str) else ""
+        if _plan == "light":
+            _guard_result = run_light_consistency_check(
+                candidate_response=final_response,
+                user_message=_user_msg_for_guard,
+            )
+        elif _plan == "full":
+            _guard_cfg = (getattr(agent, "_cognition_config", None) or {}).get("consistency_guard") or {}
+            _show_evidence = evidence_messages and _guard_cfg.get("evidence_context", True)
+            _guard_result = run_full_consistency_check(
+                candidate_response=final_response,
+                user_message=_user_msg_for_guard,
+                verifier=agent._default_consistency_verifier,
+                evidence=evidence_for_verifier(final_response, evidence_messages) if _show_evidence else "",
+            )
+        else:
+            _guard_result = None
+
+        if _guard_result is not None:
+            if _guard_result.changed and _guard_result.final_response:
+                final_response = _guard_result.final_response
+            if isinstance(meta, dict):
+                meta["verification_applied"] = _guard_result.applied
+                meta["verification_plan"] = _guard_result.plan
+                meta["verification_changed"] = _guard_result.changed
+                meta["verification_notes"] = list(_guard_result.notes)
+                if ladder is not None:
+                    meta["verification_ladder_applied_stages"] = list(ladder.stages) if _guard_result.applied else []
+    except Exception as exc:
+        # Non-fatal: guard must never break the turn.
+        logger.warning("consistency_guard wiring raised (non-fatal): %s", exc)
+    return final_response
+
+
+def _append_evidence_note(agent, final_response, evidence_messages, meta, logger):
+    """With the evidence loop on, mark the state claims no tool result backs as unverified."""
+    try:
+        note = evidence_note(agent, final_response, evidence_messages or [])
+    except Exception as exc:
+        logger.warning("evidence note raised (non-fatal): %s", exc)
+        return final_response
+    if isinstance(meta, dict):
+        meta["evidence_downgraded"] = bool(note)
+    return final_response + note if note else final_response
+
+
 def apply_cognition_consistency_guard(
     agent, final_response, *, turn_id, user_message, logger, messages=None, evidence_messages=None,
 ):
-    """PR6 verification-ladder metadata + PR3 consistency guard, at most once per turn.
+    """PR6 verification-ladder metadata, the PR3 consistency guard and the evidence note, at most
+    once per turn.
 
     Runs where the answer is about to become durable: ``finish_text_response`` calls it
     ahead of the output transform and the final flush (SQLite treats a non-blank assistant
     row as settled, so a later rewrite would reach the user but never the stored/replayed
     transcript), and ``finalize_turn`` calls it for exits that never reached that seam.
-    Only runs when the cognitive router asked for verification; never touches the system
-    prompt and is fully non-fatal — any exception keeps the candidate response. With
-    ``messages``, a revision is mirrored into the transcript tail when that row carries the
-    answer, so persistence, plugin hooks and the caller all see the revised text. The full
-    verifier also sees the tool evidence of the turn in ``evidence_messages``, so it judges
-    facts read off a tool result against that result instead of rewriting them as
-    unverifiable. Returns the (possibly revised) response."""
+    The guard only runs when the cognitive router asked for verification; its full verifier
+    sees the tool evidence of the turn in ``evidence_messages``, so it judges facts read off a
+    tool result against that result instead of rewriting them as unverifiable. With the
+    evidence loop on, state claims no tool result backs are then marked as unverified. Never
+    touches the system prompt and is fully non-fatal — any exception keeps the candidate
+    response. With ``messages``, a revision is mirrored into the transcript tail when that
+    row carries the answer, so persistence, plugin hooks and the caller all see the revised
+    text. Returns the (possibly revised) response."""
     route = getattr(agent, "_current_cognitive_route", None)
     if not final_response or route is None:
         return final_response
@@ -266,51 +336,16 @@ def apply_cognition_consistency_guard(
         # Non-fatal: ladder metadata must never change turn behavior.
         logger.warning("verification_ladder metadata raised (non-fatal): %s", exc)
 
-    if not should_run_consistency_guard(route):
-        return final_response
-    try:
-        _plan = resolve_verification_plan(route)
-        _user_msg_for_guard = user_message if isinstance(user_message, str) else ""
-        if _plan == "light":
-            _guard_result = run_light_consistency_check(
-                candidate_response=final_response,
-                user_message=_user_msg_for_guard,
-            )
-        elif _plan == "full":
-            _evidence = evidence_for_verifier(final_response, evidence_messages) if evidence_messages else ""
-            _guard_result = run_full_consistency_check(
-                candidate_response=final_response,
-                user_message=_user_msg_for_guard,
-                verifier=agent._default_consistency_verifier,
-                evidence=_evidence,
-            )
-        else:
-            _guard_result = None
-
-        if _guard_result is not None:
-            if _guard_result.changed and _guard_result.final_response:
-                final_response = _guard_result.final_response
-                _tail = messages[-1] if messages else None
-                if isinstance(_tail, dict) and _tail.get("role") == "assistant" and not _tail.get("tool_calls"):
-                    # A promoted reasoning-only row keeps ``content`` empty and replays its
-                    # ``api_content`` sidecar (#111761); revise the field the row actually uses.
-                    if _tail.get("api_content") and not flatten_message_text(_tail.get("content")).strip():
-                        _tail["api_content"] = final_response
-                    else:
-                        _tail["content"] = final_response
-            if isinstance(meta, dict):
-                meta["verification_applied"] = _guard_result.applied
-                meta["verification_plan"] = _guard_result.plan
-                meta["verification_changed"] = _guard_result.changed
-                meta["verification_notes"] = list(_guard_result.notes)
-                if _verification_ladder_plan is not None:
-                    meta["verification_ladder_applied_stages"] = (
-                        list(_verification_ladder_plan.stages) if _guard_result.applied else []
-                    )
-    except Exception as exc:
-        # Non-fatal: guard must never break the turn.
-        logger.warning("consistency_guard wiring raised (non-fatal): %s", exc)
-    return final_response
+    answer = final_response
+    if should_run_consistency_guard(route):
+        answer = _run_consistency_guard(
+            agent, answer, route, user_message=user_message, meta=meta, ladder=_verification_ladder_plan,
+            evidence_messages=evidence_messages, logger=logger,
+        )
+    answer = _append_evidence_note(agent, answer, evidence_messages, meta, logger)
+    if answer != final_response:
+        _revise_answer_row(messages, answer)
+    return answer
 
 
 def _record_cognition_observers(agent, final_response, interrupted, logger, messages=None):
@@ -340,6 +375,7 @@ def _record_cognition_observers(agent, final_response, interrupted, logger, mess
             if isinstance(meta, dict):
                 meta.update(build_process_monitor_metadata(_process_report))
                 meta.update(evidence_metadata(_evidence))
+                meta.update(evidence_loop_metadata(agent))
         except Exception as exc:
             logger.warning("process_monitor raised (non-fatal): %s", exc)
 
@@ -714,6 +750,8 @@ def finalize_turn(
     # catches every other exit (budget summary, recovery breaks, stream recovery) before
     # the trajectory save and the persist step below. Observers run after the guard has
     # settled the response so the trajectory metadata and the result carry the final trace.
+    # A turn that ends inside an evidence check round (budget, recovery) leaves it here.
+    end_evidence_round(agent)
     if not interrupted:
         final_response = apply_cognition_consistency_guard(
             agent, final_response, turn_id=turn_id, user_message=original_user_message,

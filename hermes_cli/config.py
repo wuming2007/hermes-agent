@@ -2393,6 +2393,11 @@ _FALLBACK_COMMENT = """
 #   consistency_guard:
 #     enabled: true
 #     deep_mode_only: true
+#     evidence_context: true
+#   evidence_loop:
+#     enabled: false
+#     max_rounds: 1
+#     max_extra_tool_calls: 3
 """
 
 

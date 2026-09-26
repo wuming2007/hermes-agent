@@ -1,8 +1,9 @@
 """Text-response stop gates for the conversation turn loop.
 
-When the model stops with a text answer, three gates may instead append the answer as an
+When the model stops with a text answer, four gates may instead append the answer as an
 interim row plus a synthetic user-role nudge and continue the turn: verify-on-stop (#65919),
-the ``pre_verify`` plugin hook after code edits, and the kanban worker terminal-tool guard.
+the ``pre_verify`` plugin hook after code edits, the kanban worker terminal-tool guard, and the
+cognition evidence check (``agent.cognition_evidence_gate``).
 Each keeps the candidate answer as a budget-exhaustion fallback
 (``pending_verification_response``) and clears ``final_response`` so the finalizer can tell
 this gate from error exits (#61631). Nothing here imports ``agent.conversation_loop`` at
@@ -91,6 +92,17 @@ def _kanban_stop_nudge(agent, messages) -> Optional[str]:
         return None
 
 
+def _evidence_nudge(agent, final_response, messages) -> Optional[str]:
+    """One read-only check round before an answer states results the turn's tools don't show."""
+    try:
+        from agent.cognition_evidence_gate import evidence_nudge
+
+        return evidence_nudge(agent, final_response, messages)
+    except Exception:
+        logger.debug("evidence gate check failed", exc_info=True)
+        return None
+
+
 def _append_interim_answer(agent, final_msg, messages, conversation_history, flush_fail_msg: str) -> None:
     """Real content: persist and emit as interim so the user sees the attempted answer;
     only the nudge is flagged synthetic (#65919)."""
@@ -107,10 +119,14 @@ def apply_stop_gates(
     conversation_history: Any, pending_verification_response: Any,
     pending_verification_response_previewed: Any,
 ) -> StopGateVerdict:
-    """Run verify-on-stop → pre_verify hook → kanban stop guard, in that order. Nudges
-    are user-role rows appended only after the assistant answer row, so role alternation
-    holds. Hook lookups are imported lazily from their origin modules (tests patch them
-    there)."""
+    """Run verify-on-stop → pre_verify hook → kanban stop guard → evidence check, in that
+    order. Nudges are user-role rows appended only after the assistant answer row, so role
+    alternation holds. Hook lookups are imported lazily from their origin modules (tests patch
+    them there)."""
+    from agent.cognition_evidence_gate import EVIDENCE_STOP_FLAG, begin_evidence_round, end_evidence_round
+
+    # The model answered: an evidence check round in progress is over.
+    end_evidence_round(agent)
 
     def _continue(nudge: str, flag: str) -> StopGateVerdict:
         """Append the synthetic nudge row and hand the turn back to the loop."""
@@ -167,6 +183,19 @@ def apply_stop_gates(
             "⚠️ Kanban worker tried to exit without a terminal board call "
             "(kanban_complete/kanban_request_review/kanban_block) — nudging to finish"
         )
+        return verdict
+
+    _evidence = _evidence_nudge(agent, final_response, messages)
+    if _evidence:
+        # Neither the unchecked answer nor the nudge is shown or stored: the next answer is the
+        # one the user gets (kanban-gate pattern). Only the tool calls of the check persist.
+        agent._evidence_gate_rounds = getattr(agent, "_evidence_gate_rounds", 0) + 1
+        final_msg["finish_reason"] = "evidence_check"
+        final_msg[EVIDENCE_STOP_FLAG] = True
+        append_message(messages, final_msg)
+        verdict = _continue(_evidence, EVIDENCE_STOP_FLAG)
+        begin_evidence_round(agent)
+        logger.debug("evidence check nudge issued (round %d)", agent._evidence_gate_rounds)
         return verdict
     return StopGateVerdict(
         continue_turn=False, final_response=final_response,
