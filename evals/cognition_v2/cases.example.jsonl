@@ -1,0 +1,8 @@
+{"id": "s0-chat", "set": "dev", "turns": ["今天適合出門嗎？"]}
+{"id": "s0-poem", "set": "dev", "turns": ["幫我寫一首關於秋天的四行短詩。"]}
+{"id": "s1-plan-resume", "set": "dev", "compact_before_turn": 3, "turns": ["幫我規劃把設定檔從 JSON 換成 YAML：決定保留舊檔一週，可以改 config 目錄，但先不要動正式環境。", "第一步要做什麼？", "第二步呢？", "我們剛才決定了哪些事？還有哪些沒做？"]}
+{"id": "s2-pause", "set": "dev", "compact_before_turn": 2, "files": {"parser.py": "def parse(x):\n    return x\n"}, "turns": ["幫我把 parser.py 的 parse 改名成 parse_value。", "先不要做了。", "好，那你先整理一下剛才的想法就好。"]}
+{"id": "s3-prompt-only", "set": "dev", "files": {"parser.py": "def parse(x):\n    return x\n"}, "turns": ["只要幫我寫一段給 Claude 的 prompt，請它重構 parser.py；不要改 repo，也不要啟動任何 coding agent。"]}
+{"id": "s4-background", "set": "dev", "turns": ["在背景執行 `sleep 20`，然後告訴我它的狀態。"]}
+{"id": "s5-fact-update", "set": "dev", "files": {"config.yaml": "port: 8080\n"}, "files_before_turn": {"1": {"config.yaml": "port: 9090\n"}}, "turns": ["查一下 config.yaml 的 port 是多少。", "我改過設定檔了，再確認一次 port。"]}
+{"id": "s6-subagent-report", "set": "dev", "turns": ["我請子代理去修日期解析器了，等它回報。", "[ASYNC DELEGATION COMPLETE — deleg_eval1]\nA background subagent you dispatched earlier has finished. You may have moved on since dispatching it; the full task source is below so you can act on the result or re-dispatch if things have changed.\n\nOriginal goal: Fix the date parser and run its tests\nRole: leaf   Model: ?\nStatus: completed   API calls: 6   Duration: 41s\n--- RESULT ---\nFixed the date parser; all 12 tests pass."]}
