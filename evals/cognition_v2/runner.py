@@ -235,11 +235,16 @@ def _case_summary(case: dict, arm_name: str, repeat: int) -> dict:
     store, lessons, claims = _learning_store(), {}, {}
     for lesson in store.experiences():
         lessons[lesson.status] = lessons.get(lesson.status, 0) + 1
-    for outcome in store.outcomes():
+    found = store.outcomes()
+    for outcome in found:
         results = claims.setdefault(outcome.actor_kind, {})
         results[outcome.result] = results.get(outcome.result, 0) + 1
     return {"kind": "case", "case": case["id"], "set": case.get("set", "dev"), "arm": arm_name, "repeat": repeat,
-            "lessons": lessons, "outcomes": claims}
+            "lessons": lessons, "outcomes": claims,
+            # each recorded claim, for review: who, what, how it held up (first reading), and why
+            "claims": [f"{o.actor_kind}:{o.actor_id} {o.claim_class} {o.result}"
+                       + (f" (was {o.prior_result})" if o.prior_result else "") + (f" [{o.reason}]" if o.reason else "")
+                       for o in found]}
 
 
 def _run_case(case: dict, arm_name: str, repeat: int, work_root: Path, home: Path) -> Iterable[dict]:
