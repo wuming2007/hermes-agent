@@ -194,6 +194,15 @@ def test_a_lesson_shown_but_not_followed_earns_nothing(tmp_path, monkeypatch):
     assert _store().signal_summary(lesson.experience_id).verifications == 0
 
 
+def test_before_any_task_a_request_for_other_work_gets_no_lesson(tmp_path, monkeypatch):
+    with Project(tmp_path, monkeypatch) as project:
+        project.teach_correction()
+        project.turn("day2", "幫我寫週報，順便列出測試相關的進度")  # shares 測試, but it is writing
+        row = project.last_user_row()
+
+    assert "<lessons" not in row
+
+
 def test_a_lesson_about_one_kind_of_work_stays_out_of_another(tmp_path, monkeypatch):
     with Project(tmp_path, monkeypatch) as project:
         project.script += [ToolCall("tool_call", {"calls": [{"name": "task_state", "arguments": {

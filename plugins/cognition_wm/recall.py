@@ -2,8 +2,8 @@
 
 A lesson is shown only where it applies: this project's (or one the user said holds everywhere, unless
 this project has its own on the same topic), in force or on trial, not bound to another model,
-provider or Hermes version, about the kind of work in focus, and sharing words with what the user
-asked or the task in focus. The existing policy-memory, plasticity and ranker pieces order them; none
+provider or Hermes version, about the kind of work in focus (or, before any task, the kind the
+request reads as), and sharing words with what the user asked or the task in focus. The existing policy-memory, plasticity and ranker pieces order them; none
 of them ever sees an ended lesson. The block rides the current user message, fenced, dated and
 marked advisory: never the system prompt, never an instruction or a permission by itself.
 """
@@ -19,7 +19,7 @@ from agent.memory_ranker import MemoryCandidate, MemoryRankerConfig, rank_memory
 from agent.policy_memory import PolicyMemoryItem, policy_item_to_candidate
 from plugins.cognition_wm import runtime, snapshot
 from plugins.cognition_wm.experience_store import ExperienceStore
-from plugins.cognition_wm.lessons import same_topic, search_terms
+from plugins.cognition_wm.lessons import same_topic, search_terms, work_kind
 from plugins.cognition_wm.model import Experience, Task, clip
 
 TAG = "lessons"
@@ -77,6 +77,7 @@ def select(wm: ExperienceStore, state: runtime.TurnState, *, text: str, focus: O
     if not asked:
         return []
     env = runtime.environment(model, provider)
+    kind = focus.kind if focus is not None else work_kind(text)  # before any task: read from the request
     live = [lesson for lesson in wm.experiences(project_key=state.project_key, statuses=("candidate", "active"))
             if (lesson.origin.session_id, lesson.origin.turn_id) != (state.session_id, state.turn_id)]
     own_topics = [frozenset(lesson.lesson_key.split()) for lesson in live if lesson.scope == "project"]
@@ -87,8 +88,8 @@ def select(wm: ExperienceStore, state: runtime.TurnState, *, text: str, focus: O
             continue  # this project's own lesson on the topic wins
         if any(env.get(key) != value for key, value in lesson.binds_to.items()):
             continue  # learned about another model, provider or version
-        if focus is not None and lesson.task_kind not in (None, focus.kind):
-            continue
+        if kind is not None and lesson.task_kind not in (None, kind):
+            continue  # another kind of work
         shared = asked & set(lesson.tags)
         if shared:
             candidates.append(_candidate(wm, lesson, relevance=min(1.0, 0.3 + 0.2 * len(shared))))

@@ -98,7 +98,8 @@ def test_a_correction_is_a_candidate_until_the_user_repeats_it_in_another_conver
         chat.turn("day1", "幫我跑測試")
         chat.turn("day1", "不對，要用 uv run pytest，不是直接 pytest")
         (first,) = _live()
-        assert (first.status, first.origin.authored_by, first.task_kind) == ("candidate", "owner", None)
+        # no task yet: the kind of work is read from what was asked and done
+        assert (first.status, first.origin.authored_by, first.task_kind) == ("candidate", "owner", "engineering")
         assert "uv run pytest" in first.behavior
         assert first.situation == 'asked "幫我跑測試", after terminal: pytest -q'
         assert "測試" in first.tags  # findable by what the user asked, not only by the correction

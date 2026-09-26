@@ -93,6 +93,23 @@ _KINDS: tuple[tuple[str, re.Pattern], ...] = (
     ("caution", re.compile(r"不要|別|不可以|不能|禁止|避免|\b(?:never|don'?t|do\s+not|avoid)\b", re.IGNORECASE)),
 )
 
+# The kind of work a request is when no task says so, first match wins: what is being made decides
+# ("寫週報，順便列出測試進度" is writing), then what was just done. None when unsure.
+_WORK_KINDS: tuple[tuple[str, re.Pattern], ...] = (
+    ("writing", re.compile(
+        r"寫[^，。,.]{0,4}?(?:週報|日報|月報|報告|信|郵件|文章|文件|草稿|摘要|簡報|說明|講稿|提案|貼文)|草擬|潤稿|改寫|翻譯"
+        r"|\b(?:write|draft|rewrite|translate|summari[sz]e)\b[^.!?]{0,20}\b(?:report|email|letter|post|article|doc|summary"
+        r"|essay|memo|note)s?\b", re.IGNORECASE)),
+    ("ops", re.compile(r"部署|上線|重啟|伺服器|服務狀態|監控|備份|\b(?:deploy|restart|server|rollback|backup)\b",
+                       re.IGNORECASE)),
+    ("engineering", re.compile(r"測試|程式|bug|編譯|重構|\b(?:pytest|tests?|code|bug|build|refactor|compile)\b",
+                               re.IGNORECASE)),
+    ("research", re.compile(r"研究|調查|查一下|找資料|比較|差別|\b(?:research|investigate|compare|look\s+up)\b",
+                            re.IGNORECASE)),
+)
+_STEP_WORK = {"terminal": "engineering", "execute_code": "engineering", "patch": "engineering",
+              "write_file": "engineering", "process_manage": "engineering"}
+
 _ASCII_WORD = re.compile(r"[A-Za-z][\w.+-]*")
 _CJK_RUN = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]+")
 _ASCII_STOP = frozenset("""
@@ -139,6 +156,14 @@ def read_cue(text: str) -> Optional[LessonCue]:
         return LessonCue(kind, clip(flat, 400), everywhere=bool(_EVERYWHERE.search(flat)),
                          loosens=bool(_LOOSENS.search(flat)))
     return None
+
+
+def work_kind(text: str, steps: Sequence[str] = ()) -> Optional[str]:
+    """The kind of work a request is (writing, ops, engineering, research), read from its words or
+    else from the tools just used; None when unsure, so an unclear request is never held back."""
+    flat = " ".join(str(text or "").split())
+    found = next((kind for kind, pattern in _WORK_KINDS if pattern.search(flat)), None)
+    return found or next((_STEP_WORK[s.split(":", 1)[0]] for s in steps if s.split(":", 1)[0] in _STEP_WORK), None)
 
 
 def says_wrong(text: str) -> bool:

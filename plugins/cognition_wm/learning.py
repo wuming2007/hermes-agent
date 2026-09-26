@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional, Sequence
 
 from plugins.cognition_wm import calibration, outcomes, recall, runtime
 from plugins.cognition_wm.experience_store import ExperienceStore
-from plugins.cognition_wm.lessons import LessonCue, draft_lesson, read_cue, same_topic, same_wording, says_wrong
+from plugins.cognition_wm.lessons import LessonCue, draft_lesson, read_cue, same_topic, same_wording, says_wrong, work_kind
 from plugins.cognition_wm.lessons import search_terms
 from plugins.cognition_wm.model import Experience, SourceRef, Task, clip
 from plugins.cognition_wm.provenance import RUN_ID, turn_source
@@ -151,7 +151,8 @@ def _state_lesson(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue,
         _put_in_force_if_voiced_elsewhere(wm, match, owner, state.lineage_root)
         return []
     lesson = wm.add_experience(
-        kind=draft.kind, scope=draft.scope, project_key=state.project_key, task_kind=focus.kind if focus else None,
+        kind=draft.kind, scope=draft.scope, project_key=state.project_key,
+        task_kind=focus.kind if focus else work_kind(request, steps),
         situation=draft.situation, behavior=draft.behavior, exceptions=draft.exceptions, tags=draft.tags,
         lesson_key=draft.lesson_key, status=_first_status(cue.kind, match, _voiced(wm, match), state.lineage_root),
         origin=owner, learned_under=runtime.environment(model, provider), supersedes=match.experience_id if match else None)

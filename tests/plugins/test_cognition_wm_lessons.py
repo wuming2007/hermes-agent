@@ -124,3 +124,20 @@ def test_two_wordings_of_one_lesson_are_one_topic_and_other_lessons_are_not():
 def test_a_repeated_lesson_reads_the_same_and_a_revised_one_does_not():
     assert same_wording("以後跑測試都要用 uv run pytest", "以後跑測試，都要用 uv run pytest！")
     assert not same_wording("以後跑測試都要用 uv run pytest", "不要用 uv 了，直接跑 pytest")
+
+
+@pytest.mark.parametrize("text, steps, kind", [
+    ("幫我寫這週的週報", (), "writing"),
+    ("幫我寫週報，順便列出測試相關的進度", (), "writing"),  # what is being made decides, not a word in it
+    ("Draft an email to the team", (), "writing"),
+    ("跑一下測試", (), "engineering"),
+    ("幫我修這個 bug", (), "engineering"),
+    ("部署到正式機", (), "ops"),
+    ("幫我查一下這兩個方案的差別", (), "research"),
+    ("繼續", ("terminal: pytest -q",), "engineering"),  # nothing in the words: what was just done
+    ("好", (), None),  # unsure says nothing
+])
+def test_the_kind_of_work_is_read_from_what_is_asked_when_no_task_says(text, steps, kind):
+    from plugins.cognition_wm.lessons import work_kind
+
+    assert work_kind(text, steps) == kind
