@@ -13,13 +13,16 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
+from plugins.cognition_wm.experience_store import ExperienceStore
 from plugins.cognition_wm.intents import ControlIntent
 from plugins.cognition_wm.model import Task
-from plugins.cognition_wm.store import Limits, WorkingMemoryStore
+from plugins.cognition_wm.store import Limits
 
 # Plugin settings (plugins.entries.cognition_wm.settings, declared in plugin.yaml config_schema).
 _DEFAULTS = {"snapshot_max_chars": 1600, "other_open_tasks_max": 3, "authorization_historical_after_hours": 12,
-             "scope_gate": True, "cancelled_under_yolo": "block"}
+             "scope_gate": True, "cancelled_under_yolo": "block", "learning": False, "calibration": False,
+             "lessons_max": 3, "lessons_max_chars": 600, "calibration_min_samples": 5, "expire_after_days": 30,
+             "stale_after_days": 90}
 _context = None  # the PluginContext register() received; its get_config reads the active profile's file
 
 
@@ -30,6 +33,13 @@ class Settings:
     authorization_historical_after_hours: float = 12
     scope_gate: bool = True
     cancelled_under_yolo: str = "block"  # block | approve (D2: block)
+    learning: bool = False  # phase 2: experiences from the user's corrections and verified results
+    calibration: bool = False  # phase 2: the track record of claimed results, and what it changes
+    lessons_max: int = 3
+    lessons_max_chars: int = 600
+    calibration_min_samples: int = 5
+    expire_after_days: float = 30
+    stale_after_days: float = 90
 
 
 @dataclass
@@ -45,7 +55,7 @@ class TurnState:
 
 
 _lock = threading.Lock()
-_stores: dict[str, WorkingMemoryStore] = {}
+_stores: dict[str, ExperienceStore] = {}
 _turns: dict[tuple[str, str], TurnState] = {}
 _chains: dict[tuple[str, str], tuple[str, ...]] = {}
 _pruned: set[str] = set()
@@ -68,12 +78,12 @@ def settings() -> Settings:
     return Settings(**{key: _context.get_config(key, default) for key, default in _DEFAULTS.items()})
 
 
-def store() -> WorkingMemoryStore:
+def store() -> ExperienceStore:
     key = home_key()
     with _lock:
         if key not in _stores:
             hours = settings().authorization_historical_after_hours
-            _stores[key] = WorkingMemoryStore.open(limits=Limits(historical_after_hours=float(hours)))
+            _stores[key] = ExperienceStore.open(limits=Limits(historical_after_hours=float(hours)))
         return _stores[key]
 
 
@@ -116,13 +126,18 @@ def lineage_root(session_id: str) -> str:
 
 
 def prune_once() -> None:
-    """Apply evidence retention the first time this process touches a profile's store."""
+    """Apply evidence retention the first time this process touches a profile's store, and let
+    unsupported experiences lapse when learning or calibration is on."""
     key = home_key()
     with _lock:
         if key in _pruned:
             return
         _pruned.add(key)
     store().prune_evidence()
+    current = settings()
+    if current.learning or current.calibration:
+        store().maintain(expire_after_days=float(current.expire_after_days),
+                         stale_after_days=float(current.stale_after_days))
 
 
 def remember_turn(state: TurnState) -> None:

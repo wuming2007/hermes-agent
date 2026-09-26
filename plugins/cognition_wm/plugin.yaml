@@ -30,3 +30,31 @@ config_schema:
     choices: [block, approve]
     default: block
     description: "Execution tools on a paused or cancelled task: block, or ask (which /yolo skips)."
+  learning:
+    type: bool
+    default: false
+    description: "Learn how the user wants work done from their corrections and our own verified results, and recall it for similar tasks."
+  calibration:
+    type: bool
+    default: false
+    description: "Keep a track record of claimed results per task kind, model and Hermes version; a poor record adds a check."
+  lessons_max:
+    type: int
+    default: 3
+    description: "Most lessons added to a user message."
+  lessons_max_chars:
+    type: int
+    default: 600
+    description: "Most characters of lessons added to a user message."
+  calibration_min_samples:
+    type: int
+    default: 5
+    description: "Results needed before a track record says anything or changes anything."
+  expire_after_days:
+    type: number
+    default: 30
+    description: "An unconfirmed lesson with no support for this long expires."
+  stale_after_days:
+    type: number
+    default: 90
+    description: "A lesson with no support for this long goes stale and is no longer recalled."

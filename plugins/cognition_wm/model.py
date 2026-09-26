@@ -110,3 +110,79 @@ class TaskItem:
     supersedes: str | None = None
     created_at: float = 0.0
     updated_at: float = 0.0
+
+
+# ------------------------------------------------------------------ experiences and outcomes (phase 2)
+
+EXPERIENCE_KINDS = ("preference", "procedure", "fact", "caution", "ask_first")
+EXPERIENCE_STATUSES = ("candidate", "active", "stale", "superseded", "revoked", "expired")
+ENDED_EXPERIENCE_STATUSES = frozenset({"superseded", "revoked", "expired"})
+RECALLED_STATUSES = frozenset({"candidate", "active"})
+# Where support for (or doubt about) an experience came from. The user's own words say how they want
+# the work done; only our own tool results say it worked; a report or an old record never counts
+# by itself.
+SOURCE_CLASSES = ("user_directive", "user_correction", "user_confirmation", "tool_verified",
+                  "subagent_report", "external_agent_report", "model_claim", "historical_record")
+OWNER_SOURCE_CLASSES = frozenset({"user_directive", "user_correction", "user_confirmation"})
+OUTCOME_RESULTS = ("success", "failure", "partial", "blocked", "unknown", "reported", "corrected")
+ACTOR_KINDS = ("self", "subagent", "external_agent")
+SITUATION_MAX, BEHAVIOR_MAX, EXCEPTIONS_MAX = 200, 300, 200
+
+
+@dataclass(frozen=True)
+class Experience:
+    experience_id: str
+    kind: str
+    scope: str  # project | global
+    project_key: str | None
+    task_kind: str | None
+    situation: str
+    behavior: str
+    exceptions: str
+    tags: tuple[str, ...]
+    lesson_key: str
+    status: str
+    supersedes: str | None
+    origin: SourceRef
+    binds_to: dict
+    learned_under: dict
+    created_at: float
+    updated_at: float
+    confirmed_at: float | None
+    ended_at: float | None
+    revision: int
+
+
+@dataclass(frozen=True)
+class Signal:
+    experience_id: str
+    source_class: str
+    polarity: int  # +1 supports, -1 doubts
+    evidence_key: str  # what it rests on; one key counts once
+    source: SourceRef
+    lineage: str  # the conversation it came from
+    detail: str
+    at: float
+
+
+@dataclass(frozen=True)
+class Outcome:
+    outcome_id: str
+    evidence_key: str
+    session_id: str
+    turn_id: str
+    task_id: str | None
+    project_key: str
+    task_kind: str
+    claim_class: str
+    actor_kind: str
+    actor_id: str
+    provider: str
+    hermes_version: str
+    result: str
+    prior_result: str | None  # what it read before the user (or a later check) relabelled it
+    reason: str
+    evidence_ids: tuple[str, ...]
+    intervention: dict
+    relabelled_by: SourceRef | None
+    at: float
