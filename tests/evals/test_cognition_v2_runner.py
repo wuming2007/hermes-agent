@@ -31,6 +31,7 @@ def test_both_arms_are_measured_and_the_config_is_restored(tmp_path, monkeypatch
         runner.run(home, cases, out, arms=["off", "on"], repeats=1, case_set="dev")
 
     rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    rows = [r for r in rows if r["kind"] == "turn"]
     assert [(r["arm"], r["turn"]) for r in rows] == [("off", 0), ("off", 1), ("on", 0), ("on", 1)]
     assert all(r["api_calls"] == 1 and r["final_response"] == "今天天氣不錯。" for r in rows)
     assert (home / "config.yaml").read_text(encoding="utf-8") == before
@@ -135,7 +136,7 @@ def test_the_evaluation_runs_confined_and_a_coding_agent_is_only_a_stand_in(tmp_
                          "--repeats", "1"])
 
     assert exit_.value.code == 0
-    (row,) = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    (row,) = [r for r in map(json.loads, out.read_text(encoding="utf-8").splitlines()) if r["kind"] == "turn"]
     assert any("claude -p" in call for call in row["calls"])
     assert sandbox.command_log(home) == ["claude -p refactor the parser"]
 
@@ -152,3 +153,84 @@ def test_without_confinement_the_evaluation_does_not_run(tmp_path, monkeypatch):
         runner.main(["--home", str(home), "--cases", str(tmp_path / "c.jsonl"), "--out", str(tmp_path / "o.jsonl")])
 
     assert "confined" in str(exit_.value.code)
+
+
+def _run_scripted(tmp_path, monkeypatch, case: dict, responder, arms, repeats=1):
+    from evals.cognition_v2 import runner
+
+    home = tmp_path / "eval-home"
+    runner.init_home(home)
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(json.dumps(case, ensure_ascii=False) + "\n", encoding="utf-8")
+    out = tmp_path / "rows.jsonl"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    with FakeLLMServer(responder, aux=lambda _r: Text('{"verdict":"ok"}')) as server:
+        write_hermes_home(home, server.base_url, extra_config=_NO_BORROWED_LOGINS)
+        runner.run(home, cases, out, arms=arms, repeats=repeats, case_set="dev")
+    return [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+
+
+def _test_runner(record):
+    """Runs the tests the way the request's lessons say, if any."""
+    body = record["body"]
+    rows = [str(m.get("content")) for m in body["messages"] if m.get("role") == "user"]
+    asked = rows[-1]
+    if body["messages"][-1].get("role") == "tool":
+        return Text("測試都通過了。")
+    if "測試" in asked.split("\n", 1)[0]:
+        return ToolCall("terminal", {"command": "sh run_tests.sh" if "sh run_tests.sh" in asked else "sh old_tests.sh"})
+    return Text("好，記下了。")
+
+
+_LESSON_CASE = {
+    "id": "carry-over", "set": "dev",
+    "files": {"run_tests.sh": "echo '3 passed'\n", "old_tests.sh": "echo '3 passed'\n"},
+    "sessions": [
+        {"turns": ["幫我跑測試", "不對，要用 sh run_tests.sh 跑測試，不要用 old_tests.sh"]},
+        {"turns": ["跑一下測試"]},
+    ],
+    "expect": [{"session": 1, "turn": 0, "ran": "run_tests.sh"}, {"session": 1, "turn": 0, "not_ran": "old_tests.sh"}],
+}
+
+
+def test_three_arms_are_measured_across_conversations_and_only_the_full_v2_carries_a_lesson(tmp_path, monkeypatch):
+    rows = [r for r in _run_scripted(tmp_path, monkeypatch, _LESSON_CASE, _test_runner, ["off", "on", "v2"])
+            if r.get("kind") == "turn"]
+
+    assert [(r["arm"], r["session"], r["turn"]) for r in rows] == [
+        (arm, s, t) for arm in ("off", "on", "v2") for s, t in ((0, 0), (0, 1), (1, 0))]
+    day2 = {r["arm"]: r for r in rows if r["session"] == 1}
+    assert [c["ok"] for c in day2["v2"]["checks"]] == [True, True]
+    assert [c["ok"] for c in day2["on"]["checks"]] == [False, False]  # phase 1 alone forgets
+    assert day2["v2"]["lessons_chars"] > 0 and day2["on"]["lessons_chars"] == 0
+
+
+def test_each_case_run_starts_without_what_earlier_runs_learned(tmp_path, monkeypatch):
+    rows = _run_scripted(tmp_path, monkeypatch, _LESSON_CASE, _test_runner, ["v2"], repeats=2)
+
+    # the second run counts only what it learned itself, not the first run's lesson too
+    assert [r["lessons"] for r in rows if r.get("kind") == "case"] == [{"candidate": 1}, {"candidate": 1}]
+
+
+def test_a_case_summary_counts_what_was_learned_and_how_claims_held_up(tmp_path, monkeypatch):
+    rows = _run_scripted(tmp_path, monkeypatch, _LESSON_CASE, _test_runner, ["v2"])
+    (summary,) = [r for r in rows if r.get("kind") == "case"]
+
+    assert summary["lessons"] == {"candidate": 1}
+    assert summary["outcomes"]["self"]["success"] >= 1
+
+
+def test_a_blocked_command_did_not_run():
+    from evals.cognition_v2 import runner
+
+    def call(call_id, command):
+        return {"id": call_id, "type": "function",
+                "function": {"name": "terminal", "arguments": json.dumps({"command": command})}}
+
+    rows = [{"role": "user", "content": "跑測試"},
+            {"role": "assistant", "tool_calls": [call("a", "sh deploy.sh"), call("b", "sh run_tests.sh")]},
+            {"role": "tool", "tool_call_id": "a", "content": "BLOCKED: the user paused this task"},
+            {"role": "tool", "tool_call_id": "b", "content": "3 passed"}]
+
+    assert runner._ran(rows) == ["sh run_tests.sh"]
