@@ -1407,6 +1407,19 @@ def _apply_agent_section(agent, _agent_cfg):
         agent._auto_recovery_cycles = 5
 
 
+def _init_cognition(agent, _agent_cfg) -> None:
+    """Cognitive routing scaffold (PR1). Disabled by default; when enabled,
+    each turn gets classified into fast/standard/deep with retrieval and
+    verification metadata for downstream layers to consume.
+    Loaded via the shared PR4 helper so AIAgent / CLI / gateway / cron
+    apply identical normalization (malformed sub-blocks → {}, etc.)."""
+    from agent.cognition_config import get_cognition_config as _get_cognition_config
+
+    agent._cognition_config = _get_cognition_config(_agent_cfg)
+    agent._current_cognitive_route = None
+    agent._current_turn_cognition_metadata = {}
+
+
 def _positive_int(raw: Any, *, reject: tuple = ()) -> Optional[int]:
     """``int(raw)`` when positive, else None. ``reject`` lists types refused outright (bool, float)."""
     if reject and isinstance(raw, reject):
@@ -2436,6 +2449,7 @@ def init_agent(
     _apply_display_config(agent, _agent_cfg, platform)
     _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=memory_manager)
     _apply_agent_section(agent, _agent_cfg)
+    _init_cognition(agent, _agent_cfg)
     cs = _parse_compression_config(agent, _agent_cfg)
     _config_context_length, _custom_providers, _effective_context_length, _model_cfg = _resolve_context_length(
         agent, _agent_cfg, base_url

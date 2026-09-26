@@ -850,6 +850,32 @@ def _memory_query_text(original_user_message: Any) -> str:
     return ""
 
 
+def _record_policy_recall_metadata(agent: Any) -> None:
+    """Copy the manager's PR15 policy-recall and PR17 plasticity metadata from the
+    layer-aware prefetch into the turn's cognition metadata (non-fatal)."""
+    _turn_meta = getattr(agent, "_current_turn_cognition_metadata", None)
+    if not isinstance(_turn_meta, dict):
+        return
+    try:
+        _policy_meta = getattr(agent._memory_manager, "last_policy_recall_metadata", None)
+        if isinstance(_policy_meta, dict):
+            _turn_meta.update({
+                "policy_memory_enabled": bool(_policy_meta.get("enabled")),
+                "policy_memory_count": int(_policy_meta.get("count") or 0),
+                "policy_memory_ids": list(_policy_meta.get("policy_ids") or []),
+                "policy_memory_citations": list(_policy_meta.get("citations") or []),
+                "policy_memory_categories": list(_policy_meta.get("categories") or []),
+            })
+    except Exception:
+        pass
+    try:
+        _plasticity_meta = getattr(agent._memory_manager, "last_plasticity_metadata", None)
+        if isinstance(_plasticity_meta, dict):
+            _turn_meta.update(_plasticity_meta)
+    except Exception:
+        pass
+
+
 def _memory_turn_start_and_prefetch(
     agent: Any, original_user_message: Any, turn_author: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -867,10 +893,25 @@ def _memory_turn_start_and_prefetch(
             author_id=_author.get("id") or None, author_name=_author.get("name") or None,
             author_is_bot=bool(_author.get("is_bot")),
         )
+    # PR2: when the cognitive router has produced a route for this turn the
+    # prefetch goes through the layer-aware orchestration so the provider only
+    # consults the requested memory layers (principles / semantic / episodic).
+    # When no route exists (cognition disabled or router returned None) fall
+    # back to the legacy prefetch_all path so behavior is bit-for-bit
+    # identical to upstream.
     ext_prefetch_cache = ""
     with suppress(Exception):
         if not is_trivial_prompt(_query):
-            ext_prefetch_cache = agent._memory_manager.prefetch_all(_query, session_id=agent.session_id) or ""
+            from agent.retrieval_policy import resolve_retrieval_policy
+
+            _policy = resolve_retrieval_policy(getattr(agent, "_current_cognitive_route", None))
+            if _policy is not None:
+                ext_prefetch_cache = agent._memory_manager.prefetch_ranked_for_policy(
+                    _query, layers=_policy.layers, session_id=agent.session_id
+                ) or ""
+                _record_policy_recall_metadata(agent)
+            else:
+                ext_prefetch_cache = agent._memory_manager.prefetch_all(_query, session_id=agent.session_id) or ""
     # Deterministic recall indicator via _emit_status so the model can't silently
     # drop injected memory.
     if ext_prefetch_cache:
@@ -1129,6 +1170,15 @@ def build_turn_context(
     )
 
     _bind_interrupt_scope(agent, ra)
+
+    # ── Cognitive routing (PR1) ─────────────────────────────────────────
+    # Resolve route metadata before any prefetch / model selection so
+    # downstream layers can consume it. Disabled by default; when off,
+    # this stays a no-op and behavior matches upstream exactly.
+    _resolve_route = getattr(agent, "_resolve_current_cognitive_route", None)
+    if callable(_resolve_route):
+        _resolve_route(original_user_message=original_user_message, messages=messages)
+
     ext_prefetch_cache = _memory_turn_start_and_prefetch(agent, original_user_message, turn_author)
 
     # Title the session now: titling depends only on the user's ask (before any injected

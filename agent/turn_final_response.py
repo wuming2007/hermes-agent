@@ -50,6 +50,7 @@ def finish_text_response(
     _preflight_compression_blocked: Any, codex_ack_continuations: Any,
     truncated_response_parts: Any, length_continue_retries: Any,
     _pending_verification_response: Any, _pending_verification_response_previewed: Any,
+    original_user_message: Any = None,
 ) -> FinalResponseVerdict:
     """Finish (or defer) a text-only assistant response in the original guard order. Every
     continuation path sets ``final_response = None`` so an acknowledgment never suppresses
@@ -305,7 +306,20 @@ def finish_text_response(
     # assistant row as settled, so a transform after this write would reach the user but never
     # the stored/replayed transcript (#44239). finalize_turn reads the recorded outcome; like
     # there, an interrupted turn keeps the raw text.
-    from agent.turn_finalizer import apply_llm_output_transform
+    from agent.turn_finalizer import apply_cognition_consistency_guard, apply_llm_output_transform
+    # The cognitive consistency guard (PR3) revises the answer at this same seam, ahead of the
+    # transform; finalize_turn skips it for the rest of the turn.
+    if not getattr(agent, "_interrupt_requested", False):
+        _guarded = apply_cognition_consistency_guard(
+            agent, final_response, turn_id=getattr(agent, "_current_turn_id", "") or "",
+            user_message=original_user_message, logger=logger,
+        )
+        if _guarded != final_response:
+            final_response = _guarded
+            if _promoted:
+                final_msg["api_content"] = final_response
+            else:
+                final_msg["content"] = final_response
     _transformed = False
     if not getattr(agent, "_interrupt_requested", False):
         final_response, _transformed, _ = apply_llm_output_transform(
