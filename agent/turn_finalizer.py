@@ -232,6 +232,8 @@ def apply_cognition_consistency_guard(agent, final_response, *, turn_id, user_me
     route = getattr(agent, "_current_cognitive_route", None)
     if not final_response or route is None:
         return final_response
+    # Keyed on the turn id build_turn_context binds before any seam runs. An empty id only
+    # disables the dedupe: matching on "" would skip the guard on every later turn instead.
     if turn_id and getattr(agent, "_cognition_guard_turn_id", None) == turn_id:
         return final_response
     agent._cognition_guard_turn_id = turn_id
@@ -277,7 +279,12 @@ def apply_cognition_consistency_guard(agent, final_response, *, turn_id, user_me
                 final_response = _guard_result.final_response
                 _tail = messages[-1] if messages else None
                 if isinstance(_tail, dict) and _tail.get("role") == "assistant" and not _tail.get("tool_calls"):
-                    _tail["content"] = final_response
+                    # A promoted reasoning-only row keeps ``content`` empty and replays its
+                    # ``api_content`` sidecar (#111761); revise the field the row actually uses.
+                    if _tail.get("api_content") and not flatten_message_text(_tail.get("content")).strip():
+                        _tail["api_content"] = final_response
+                    else:
+                        _tail["content"] = final_response
             if isinstance(meta, dict):
                 meta["verification_applied"] = _guard_result.applied
                 meta["verification_plan"] = _guard_result.plan

@@ -150,6 +150,26 @@ def test_recovery_exit_revision_is_what_gets_persisted(monkeypatch):
     assert result["cognition_trace"]["route"]["mode"] == "deep"
 
 
+def test_revision_of_a_promoted_reasoning_row_lands_in_its_replay_sidecar():
+    """A reasoning-only clean stop keeps ``content`` empty and replays ``api_content``
+    (#111761); a finalizer-side revision must update that sidecar, not invent content."""
+    agent = _CognitionAgent()
+    messages = [
+        {"role": "user", "content": "上次的設計回顧"},
+        {"role": "assistant", "content": "", "api_content": "candidate", "reasoning": "candidate"},
+    ]
+
+    with patch("agent.turn_finalizer.run_full_consistency_check", return_value=_revised()):
+        revised = apply_cognition_consistency_guard(
+            agent, "candidate", turn_id="turn-1", user_message="上次的設計回顧",
+            logger=SimpleNamespace(warning=lambda *a, **k: None), messages=messages,
+        )
+
+    assert revised == "REVISED"
+    assert messages[-1]["api_content"] == "REVISED"
+    assert messages[-1]["content"] == ""
+
+
 def test_guard_already_run_this_turn_is_not_repeated(monkeypatch):
     """The text-response seam's guard pass counts for the whole turn."""
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
