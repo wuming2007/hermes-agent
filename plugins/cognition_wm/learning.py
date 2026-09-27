@@ -37,6 +37,8 @@ from plugins.cognition_wm.provenance import RUN_ID, turn_source
 logger = logging.getLogger(__name__)
 LAST_TURN_KEY = "last_turn:{}"  # lineage -> the turn whose outcomes a correction marks
 EXPOSED_KEY = "exposed:{}"  # lineage -> the lessons shown in its latest turn
+CHANGES_KEY = "changes:{}"  # lineage -> how many turns changed something (a check after one is new evidence)
+_CHANGING = frozenset({"write", "delegate_report"})
 _LIVE = ("candidate", "active", "stale")
 _CHAIN_DEPTH = 5
 
@@ -327,7 +329,9 @@ def _after_turn(state: runtime.TurnState, answer: str, history: Sequence[Any], *
     report = build_evidence_report(answer, list(history or []))
     finished = _done_this_turn(wm, state)
     task = runtime.focus_task(state) or (finished[0] if finished else None)
-    scope_key = f"task:{task.task_id}" if task else f"conv:{state.lineage_root}"
+    # The same check seen again counts once in a conversation until something changes, however the
+    # model splits the work into tasks.
+    scope_key = f"conv:{state.lineage_root}:g{_changes(wm, state, report)}"
     drafts = outcomes.turn_outcomes(report, model=model, scope_key=scope_key,
                                     turn_key=f"{state.session_id}:{state.turn_id}")
     if current.calibration:
@@ -335,7 +339,19 @@ def _after_turn(state: runtime.TurnState, answer: str, history: Sequence[Any], *
         wm.set_meta(LAST_TURN_KEY.format(state.lineage_root),
                     json.dumps({"session": state.session_id, "turn": state.turn_id}))
     if current.learning:
-        _credit_followed(wm, state, report, drafts, scope_key)
+        _credit_followed(wm, state, report, drafts)
+
+
+def _changes(wm: ExperienceStore, state: runtime.TurnState, report: Any) -> int:
+    """How many turns of this conversation changed something (a write, or a subagent or coding agent
+    that may have), this one included."""
+    key = CHANGES_KEY.format(state.lineage_root)
+    count = int(_meta(wm, key).get("n", 0))
+    if any(item.status != "blocked" and (item.kind in _CHANGING or _CHANGING & set(item.kinds))
+           for item in report.evidence):
+        count += 1
+        wm.set_meta(key, json.dumps({"n": count}))
+    return count
 
 
 def _record(wm: ExperienceStore, state: runtime.TurnState, drafts: Sequence[outcomes.OutcomeDraft], *,
@@ -369,8 +385,9 @@ def _record(wm: ExperienceStore, state: runtime.TurnState, drafts: Sequence[outc
 
 
 def _credit_followed(wm: ExperienceStore, state: runtime.TurnState, report: Any,
-                     drafts: Sequence[outcomes.OutcomeDraft], scope_key: str) -> None:
-    """A lesson shown this turn, followed by a command of ours that worked: one count per task."""
+                     drafts: Sequence[outcomes.OutcomeDraft]) -> None:
+    """A lesson shown this turn, followed by a command of ours that worked: one count per
+    conversation, so opening more tasks never adds to it."""
     shown = _meta(wm, EXPOSED_KEY.format(state.lineage_root))
     if shown.get("turn") != state.turn_id:
         return
@@ -381,7 +398,8 @@ def _credit_followed(wm: ExperienceStore, state: runtime.TurnState, report: Any,
         if lesson.status not in _LIVE or not hits:
             continue
         checked = _checked_by_us(state, hits[-1].evidence_id)
-        if not wm.add_signal(lesson.experience_id, source_class="tool_verified", polarity=1, evidence_key=scope_key,
+        if not wm.add_signal(lesson.experience_id, source_class="tool_verified", polarity=1,
+                             evidence_key=f"conv:{state.lineage_root}",
                              source=checked, lineage=state.lineage_root, detail=hits[-1].target):
             continue
         summary = wm.signal_summary(lesson.experience_id)

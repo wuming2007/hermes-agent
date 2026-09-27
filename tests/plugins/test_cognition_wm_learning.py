@@ -221,7 +221,8 @@ def test_only_our_own_check_counts_and_a_repeated_check_counts_once(tmp_path, mo
         chat.turn("s1", "你自己跑一次確認")
 
     assert _store().outcomes(actor_kind="external_agent")[0].result == "success"  # our own check confirmed it
-    assert len(_store().outcomes(actor_kind="self", results=("success",))) == 1  # the same check, counted once
+    # the rerun before the agent counted once; the check after it (it may have changed files) is new evidence
+    assert len(_store().outcomes(actor_kind="self", results=("success",))) == 2
 
 
 def test_the_users_correction_marks_the_last_claim_corrected(tmp_path, monkeypatch):
@@ -247,3 +248,22 @@ def test_correcting_how_it_was_done_keeps_a_checked_result_and_counts_the_users_
 
     (outcome,) = _store().outcomes(actor_kind="self")
     assert (outcome.result, outcome.prior_result, outcome.intervention.get("corrections")) == ("success", None, 1)
+
+
+def test_a_check_rerun_under_new_tasks_counts_once_until_something_changes(tmp_path, monkeypatch):
+    """Found with the real model: asked to run the tests again, it opened a new task each time, and
+    each rerun of the same check counted as another success. A rerun counts once however the work is
+    split into tasks; a check after a change is new evidence."""
+    script = []
+    with Chat(tmp_path, monkeypatch, lambda r: script.pop(0) if script else Text("好。")) as chat:
+        for title in ("跑測試", "再確認一次", "最後確認"):
+            script += [_task(title), _terminal(chat.cmd("pytest -q")), Text("測試都通過了。")]
+        chat.turn("s1", "幫我跑測試")
+        chat.turn("s1", "再跑一次確認")
+        chat.turn("s1", "最後再跑一次")
+        script += [ToolCall("write_file", {"path": "app.py", "content": "x = 2\n"}), _terminal(chat.cmd("pytest -q")),
+                   Text("改完了，測試都通過了。")]
+        chat.turn("s1", "把 app.py 的 x 改成 2，再跑測試")
+
+    passed = [o for o in _store().outcomes(actor_kind="self", results=("success",)) if o.claim_class == "tests_pass"]
+    assert len(passed) == 2  # the first check, and the one after the change

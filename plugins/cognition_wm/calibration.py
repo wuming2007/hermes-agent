@@ -117,9 +117,15 @@ def for_turn(wm: ExperienceStore, state: runtime.TurnState, focus: Task, *, mode
     version = runtime.environment(model, provider)["hermes_version"]
     mine = dict(task_kind=focus.kind, actor_kind="self", actor_id=model or "unknown-model", provider=provider or "",
                 hermes_version=version)
-    scope, found = "this project", cells(wm.outcomes(project_key=state.project_key, **mine))
+
+    def answer_cells(found: Iterable[Outcome]) -> list[Cell]:
+        # A task marked done without evidence ids is a bookkeeping gap, shown by ``track-record``; only
+        # claims made in answers, which the answer check can test, change the turn.
+        return [cell for cell in cells(found) if cell.claim_class != "task"]
+
+    scope, found = "this project", answer_cells(wm.outcomes(project_key=state.project_key, **mine))
     if not any(len(cell.counted) >= min_samples for cell in found):
-        scope, found = "all projects", cells(wm.outcomes(**mine))
+        scope, found = "all projects", answer_cells(wm.outcomes(**mine))
     rated = [(cell, cell.band(min_samples)) for cell in found if len(cell.counted) >= min_samples]
     if not rated:
         return {"track_record_band": "unknown"}, []

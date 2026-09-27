@@ -155,3 +155,17 @@ def test_the_track_record_command_keeps_models_apart_and_says_when_it_is_too_ear
 
     assert cli.cognition_command(parser.parse_args(["track-record", "--reset"])) == 0
     assert runtime.store().outcomes() == []
+
+
+def test_tasks_marked_done_without_evidence_ids_alone_never_add_a_check(tmp_path, monkeypatch):
+    """Found with the real model: it marks tasks done without citing evidence ids far more often than
+    its answers are wrong. That bookkeeping gap is shown in the track record but does not make every
+    turn of the kind of work pay for the full answer check."""
+    with Session(tmp_path, monkeypatch) as session:
+        _record(["unknown"] * 8, claim="task")
+        session.script += [_task(), Text("好，開始。")]
+        session.turn("幫我修不穩的測試")
+        before = session.verifier_calls()
+        row = session.turn("繼續")
+
+    assert "Track record" not in row and session.verifier_calls() == before
