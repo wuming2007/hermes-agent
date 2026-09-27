@@ -289,6 +289,20 @@ def test_running_the_command_a_lesson_replaces_is_not_following_it(tmp_path, mon
     assert _store().signal_summary(lesson.experience_id).verifications == 0
 
 
+def test_running_a_lessons_command_earns_credit_only_with_a_result_that_held(tmp_path, monkeypatch):
+    """Exit status 0 and no failure are not enough: the run must back a result of ours that held."""
+    with Project(tmp_path, monkeypatch) as project:
+        project.teach_correction()
+        (lesson,) = _store().experiences()
+        project.script += [_task("跑測試 day2"), project.run("uv run pytest -q"), Text("輸出在上面。")]
+        project.turn("day2", "跑一下測試")
+        quiet = _store().signal_summary(lesson.experience_id).verifications
+        project.script += [_task("跑測試 day3"), project.run("uv run pytest -q"), Text("測試都通過了。")]
+        project.turn("day3", "跑一下測試")
+
+    assert (quiet, _store().signal_summary(lesson.experience_id).verifications) == (0, 1)
+
+
 def test_a_kept_lesson_is_not_copied_into_memory_or_a_skill_even_without_its_markers(tmp_path, monkeypatch):
     """A copy in long-term memory or a skill would outlive the lesson's revocation. A write that
     repeats a kept lesson word for word is refused; a reworded copy is not caught (see the docs)."""

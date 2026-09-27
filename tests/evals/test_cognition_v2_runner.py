@@ -153,9 +153,10 @@ def test_a_case_run_sees_neither_the_cases_nor_another_case_run(tmp_path):
         {"id": "probe", "set": "dev", "turns": ["找找看"]},
         {"id": "secret", "set": "holdout", "turns": ["HOLDOUT-5b9d"], "expect": [{"answer_has": "HOLDOUT-5b9d"}]},
     )), encoding="utf-8")
+    (home / "holdout-extra.jsonl").write_text('{"id": "kept-here", "turns": ["HOLDOUT-5b9d"]}\n', encoding="utf-8")
     out = tmp_path / "rows.jsonl"
     probes = [ToolCall("terminal", {"command": f"cat '{cases}'"}), ToolCall("terminal", {"command": f"cat '{out}'"}),
-              ToolCall("terminal", {"command": f"grep -ra NEIGHBOR-7c1e '{home}' | head -5"}),
+              ToolCall("terminal", {"command": f"grep -ra -e NEIGHBOR-7c1e -e HOLDOUT-5b9d '{home}' | head -5"}),
               ToolCall("terminal", {"command": f"ls -R '{home}' | head -40"}),
               ToolCall("search_files", {"path": str(home), "pattern": "NEIGHBOR-7c1e", "target": "content"})]
 

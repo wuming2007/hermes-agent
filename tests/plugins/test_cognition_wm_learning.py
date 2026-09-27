@@ -438,8 +438,12 @@ def test_a_rerun_that_differs_only_in_its_timing_counts_once(tmp_path, monkeypat
     assert len(_store().outcomes(actor_kind="self", results=("success",))) == 1
 
 
-def test_a_long_running_process_still_lets_old_lessons_lapse(tmp_path, monkeypatch):
-    """Upkeep runs again while the process keeps running (at most once an hour), not only at its start."""
+def test_a_long_running_process_keeps_its_limits_checking_at_most_hourly(tmp_path, monkeypatch):
+    """Upkeep runs again while the process keeps running, not only at its start, and not every turn:
+    at most once an hour."""
+    from plugins.cognition_wm import runtime
+    from plugins.cognition_wm.model import SourceRef
+
     script = []
     with Chat(tmp_path, monkeypatch, _play(script)) as chat:
         now = [time.time()]
@@ -447,8 +451,21 @@ def test_a_long_running_process_still_lets_old_lessons_lapse(tmp_path, monkeypat
         script += [_terminal(chat.cmd("pytest -q")), Text("測試都通過了。"), Text("好。")]
         chat.turn("s1", "幫我跑測試")
         chat.turn("s1", "不對，要用 uv run pytest")
-        (lesson,) = _live()
+        (first,) = _live()
         now[0] += 31 * 86400  # a month later, in the same process
         chat.turn("s1", "今天天氣如何？")
+        assert _store().experience(first.experience_id).status == "expired"
 
-    assert _store().experience(lesson.experience_id).status == "expired"
+        upkept_at, now[0] = now[0], now[0] - 30 * 86400 + 600  # a lesson that turns 30 days old ten minutes on
+        said = SourceRef(type="user_message", session_id="earlier", turn_id="t1", ref="m", at=now[0],
+                         authored_by="owner", run_id="run-a")
+        second = _store().add_experience(kind="procedure", scope="project", project_key=runtime.project_key(),
+                                         task_kind=None, situation="this project", behavior="use `make test`",
+                                         status="candidate", origin=said)
+        now[0] = upkept_at + 1200
+        chat.turn("s1", "那明天呢？")
+        within_the_hour = _store().experience(second.experience_id).status
+        now[0] = upkept_at + 3700
+        chat.turn("s1", "謝謝")
+
+    assert (within_the_hour, _store().experience(second.experience_id).status) == ("candidate", "expired")
