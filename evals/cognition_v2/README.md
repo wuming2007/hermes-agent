@@ -16,19 +16,30 @@ The scripted, reproducible versions are `tests/e2e/cognition_v2/test_scenarios.p
   CLI or Claude Code login (their refresh tokens rotate, so borrowing can log those programs out).
   The runner refuses a home where it is on.
 - Toolsets are `file`, `terminal` and `cognition_wm`: no messaging, web, cron or subagents.
-  Every case runs in its own directory under `<eval home>/eval-work/`.
-- A separate HERMES_HOME and work directory are not a sandbox, so the run is re-executed under a
-  macOS Seatbelt profile (`sandbox.py`; it refuses to run where `sandbox-exec` is missing): the real
-  home and `/Volumes/Data` can be neither read nor written except the eval home, this checkout and
-  the Python install; the run gets its own HOME inside the eval home; `claude`, `codex` and the other
-  coding agents on its PATH are stand-ins that only log the call (`fake-bin/calls.log`); running the
-  real agents, `launchctl`, `osascript`, `open`, `crontab`, `sudo`, `security`, `hermes` and the usual
-  network clients is denied.
-- What stays open: network (the model's API) and reading the eval home, including its own login.
-  Every call a case made is in its result row (`calls`) for review.
+- Every case run gets a home of its own, `<eval home>/runs/<random id>/`, with a copy of the eval
+  home's `config.yaml` (set to the arm), login and persona. It is its HERMES_HOME and holds its work
+  directories, sessions and working memory, and it is removed when the run ends. A refreshed login
+  is copied back to the eval home first, and the coding-agent calls the stand-ins logged are added
+  to `<eval home>/fake-bin/calls.log`. Directory names and session ids say nothing about the case
+  or the arm. The eval home's own `config.yaml` is never changed.
+- The cases, with their checks, are read by the runner outside the confinement. A case run gets
+  only its own case, on stdin, and hands its rows back on stdout, each after a one-time key, so
+  nothing inside can add a row.
+- A separate HERMES_HOME and work directory are not a sandbox, so every case run is its own process
+  under a macOS Seatbelt profile (`sandbox.py`; it refuses to run where `sandbox-exec` is missing).
+  - The real home and `/Volumes/Data` can be neither read nor written, except the run's own home,
+    this checkout and the Python install. The rest of the eval home can be passed through, but not
+    listed or read: holdout files kept there, other runs' homes, the eval home's own login.
+  - The cases file, the results file and every other `.jsonl` next to the cases cannot be read,
+    even inside the checkout.
+  - The run gets its own HOME inside its home. `claude`, `codex` and the other coding agents on its
+    PATH are stand-ins that only log the call.
+  - Running the real agents, `launchctl`, `osascript`, `open`, `crontab`, `sudo`, `security`,
+    `hermes` and the usual network clients is denied.
+- What stays open: network (the model's API) and the run's own home, including its copy of the
+  login. Every call a case made is in its result row (`calls`) for review.
 - Turns run non-interactively, so an action that needs human approval is denied, exactly as in
   `hermes chat -q`.
-- The eval home's `config.yaml` is restored after the run.
 
 ## Procedure
 
@@ -47,7 +58,8 @@ python evals/cognition_v2/runner.py --summarize results.jsonl
   more in a private file, marked `"set": "holdout"`. Do not read or tune on them during
   development; run them once at the end with `--set holdout`.
 - **Arms and repeats**: `off`, `on` and `v2` (`--arms`), three repeats each, same model. Every
-  case run starts with nothing learned or recorded, so runs and cases stay independent.
+  case run starts in a fresh home with nothing learned or recorded, so runs and cases stay
+  independent.
 - **Per turn** (one JSONL row, `kind: turn`): wall time, API calls, prompt and completion tokens,
   estimated cost, tool calls, blocked tool calls, working-memory and lessons characters added to
   the user message, evidence-loop rounds, unsupported claims, whether the answer was marked,

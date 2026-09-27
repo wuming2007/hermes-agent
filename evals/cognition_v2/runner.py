@@ -7,7 +7,13 @@ day), each turn run as a fresh agent (like ``hermes chat -r``) in the case's own
 turn writes one JSONL row (latency, API calls, tokens, tool calls and how many were blocked, the
 working-memory and lessons characters added, the evidence-loop outcome, whether the answer check
 ran, the case's checks for that turn, the final answer), and each case run ends with a summary row
-(what was learned, how the recorded claims held up). Every case run starts with nothing learned.
+(what was learned, how the recorded claims held up).
+
+Every case run has a home of its own: a fresh directory under the eval home with a copy of its
+config (set to the arm), login and persona, removed when the run ends, so it starts with nothing
+learned and leaves nothing for the next run to find. The cases, with their checks, are read here,
+by this trusted runner; a case run gets only its own case, and cannot read the cases file, the
+results file or another run's home (``sandbox.py``).
 
 Runs only in a dedicated eval home made with ``--init-home`` (never the everyday ``~/.hermes``).
 The toolsets are file, terminal and task_state: no messaging, web, cron or subagents, so a case
@@ -33,9 +39,11 @@ import statistics
 import sys
 import threading
 import time
+import uuid
 from collections import defaultdict
+from functools import partial
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 if __package__ in (None, ""):  # run as a script: import the checkout, not an installed copy
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -51,6 +59,8 @@ ARMS = {
 METRICS = ("wall_s", "api_calls", "tool_calls", "blocked_tool_calls", "prompt_tokens", "completion_tokens",
            "snapshot_chars", "lessons_chars", "evidence_rounds", "evidence_unsupported")
 _LESSONS = re.compile(r'<lessons unchanged rev="[^"]+"/>|<lessons rev="[^"]+">[\s\S]*?</lessons>')
+# What a case run's home copies from the eval home (the config is then set to the arm).
+_CARRIED = ("config.yaml", "auth.json", ".env", "SOUL.md")
 
 
 def _borrows_logins(home: Path) -> bool:
@@ -90,7 +100,7 @@ def _check_home(home: Path) -> None:
 
 
 def _set_arm(home: Path, arm: dict) -> None:
-    """Point the eval home's config at one arm through the canonical config writer."""
+    """Point a home's config at one arm through the canonical config writer."""
     from hermes_cli.config import atomic_config_write, read_user_config_raw
 
     path = home / "config.yaml"
@@ -205,13 +215,6 @@ def _learning_store():
     return ExperienceStore.open()
 
 
-def _start_clean() -> None:
-    """Nothing learned or recorded by an earlier case run carries into this one."""
-    store = _learning_store()
-    store.forget_experiences()
-    store.forget_outcomes()
-
-
 def _seed_outcomes(case: dict, home: Path) -> None:
     """Earlier results a case starts from (a track record), for the eval model in the case directory."""
     if not case.get("seed_outcomes"):
@@ -247,26 +250,26 @@ def _case_summary(case: dict, arm_name: str, repeat: int) -> dict:
                        for o in found]}
 
 
-def _run_case(case: dict, arm_name: str, repeat: int, work_root: Path, home: Path) -> Iterable[dict]:
+def _run_case(case: dict, arm_name: str, repeat: int, home: Path) -> Iterable[dict]:
+    """One case run in ``home``, its own HERMES_HOME; its directories and session ids say nothing
+    about the case or the arm."""
     from hermes_state import SessionDB
     from run_agent import AIAgent
 
-    root = work_root / f"{case['id']}-{arm_name}-{repeat}"
-    shutil.rmtree(root, ignore_errors=True)
-    root.mkdir(parents=True)
+    root = home / "work"
+    root.mkdir(parents=True, exist_ok=True)
     _write_files(root, case.get("files"))
     os.chdir(root)
-    _start_clean()
     _seed_outcomes(case, home)
     db = SessionDB()
     runtime = _runtime_kwargs()
-    stamp = int(time.time() * 1000)
+    run_id = uuid.uuid4().hex[:12]
     for s_index, session in enumerate(_sessions(case)):
         work = root / session["project"] if session.get("project") else root
         work.mkdir(parents=True, exist_ok=True)
         _write_files(work, session.get("files"))
         os.chdir(work)
-        session_id = f"cv2-{case['id']}-{arm_name}-{repeat}-{s_index}-{stamp}"
+        session_id = f"cv2-{run_id}-{s_index}"
         for index, message in enumerate(session["turns"]):
             _write_files(work, (session.get("files_before_turn") or {}).get(str(index)))  # the world changes
             if session.get("compact_before_turn") == index:
@@ -312,43 +315,101 @@ def _compress(agent: Any, db: Any, session_id: str) -> None:
                                "history_lock": threading.Lock(), "history_version": 1, "session_key": session_id}, "")
 
 
-def run(home: Path, cases_path: Path, out: Path, *, arms: list[str], repeats: int, case_set: str) -> None:
-    _check_home(home)
-    os.environ["HERMES_HOME"] = str(home.resolve())
-    from hermes_cli.config import read_user_config_raw
+def _run_home(home: Path, arm: dict) -> Path:
+    """A fresh home for one case run: the eval home's config (set to the arm), login and persona."""
+    run_home = home / "runs" / uuid.uuid4().hex[:12]
+    run_home.mkdir(parents=True)
+    for name in _CARRIED:
+        if (home / name).exists():
+            shutil.copy2(home / name, run_home / name)
+    (run_home / MARKER).write_text("cognition v2 case run — removed when the run ends\n", encoding="utf-8")
+    _set_arm(run_home, arm)
+    return run_home
+
+
+def _close_run_home(run_home: Path, home: Path) -> None:
+    """Keep what the eval home needs from a finished run — a refreshed login (its refresh token may
+    have rotated) and the coding-agent calls the stand-ins logged — and remove the rest."""
+    login = run_home / "auth.json"
+    if login.exists() and (not (home / "auth.json").exists()
+                           or login.read_bytes() != (home / "auth.json").read_bytes()):
+        staged = home / "auth.json.cv2-tmp"
+        shutil.copy2(login, staged)
+        os.replace(staged, home / "auth.json")
+    calls = run_home / "fake-bin" / "calls.log"
+    if calls.exists():
+        (home / "fake-bin").mkdir(exist_ok=True)
+        with (home / "fake-bin" / "calls.log").open("a", encoding="utf-8") as log:
+            log.write(calls.read_text(encoding="utf-8"))
+    shutil.rmtree(run_home, ignore_errors=True)
+
+
+def _run_here(run_home: Path, case: dict, arm_name: str, repeat: int) -> Iterable[dict]:
+    """A case run in this process, with ``run_home`` as HERMES_HOME (the tests; a confined case run
+    does the same in its own process)."""
     from hermes_cli.plugins import discover_plugins
 
+    before_home, before_cwd = os.environ.get("HERMES_HOME"), os.getcwd()
+    os.environ["HERMES_HOME"] = str(run_home)
+    try:
+        discover_plugins(force=True)
+        yield from _run_case(case, arm_name, repeat, run_home)
+    finally:
+        os.chdir(before_cwd)
+        if before_home is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = before_home
+
+
+def _error_row(case: dict, arm_name: str, repeat: int, exc: Exception) -> dict:
+    return {"kind": "error", "case": case["id"], "set": case.get("set", "dev"), "arm": arm_name, "repeat": repeat,
+            "error": f"{type(exc).__name__}: {exc}"}
+
+
+def run(home: Path, cases_path: Path, out: Path, *, arms: list[str], repeats: int, case_set: str,
+        execute: Callable[..., Iterable[dict]] = _run_here) -> None:
+    """Every case run in a home of its own, through ``execute(run_home, case, arm, repeat)``."""
+    _check_home(home)
+    home = home.resolve()
     cases = [json.loads(line) for line in cases_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     cases = [c for c in cases if case_set == "all" or c.get("set", "dev") == case_set]
-    original = read_user_config_raw(home / "config.yaml") if (home / "config.yaml").exists() else None
-    try:
-        with out.open("a", encoding="utf-8") as sink:
-            for arm_name in arms:
-                _set_arm(home, ARMS[arm_name])
-                discover_plugins(force=True)
-                for repeat in range(repeats):
-                    for case in cases:
-                        try:
-                            for row in _run_case(case, arm_name, repeat, home / "eval-work", home):
-                                sink.write(json.dumps(row, ensure_ascii=False) + "\n")
-                                sink.flush()
-                                if row["kind"] == "turn":
-                                    print(f"{row['arm']} r{repeat} {row['case']} s{row['session']} t{row['turn']}: "
-                                          f"{row['wall_s']}s calls={row['api_calls']} "
-                                          f"blocked={row['blocked_tool_calls']} "
-                                          f"checks={sum(c['ok'] for c in row['checks'])}/{len(row['checks'])}",
-                                          flush=True)
-                        except Exception as exc:  # one broken case is recorded; hours of other cases are kept
-                            error = {"kind": "error", "case": case["id"], "set": case.get("set", "dev"),
-                                     "arm": arm_name, "repeat": repeat, "error": f"{type(exc).__name__}: {exc}"}
-                            sink.write(json.dumps(error, ensure_ascii=False) + "\n")
+    with out.open("a", encoding="utf-8") as sink:
+        for arm_name in arms:
+            for repeat in range(repeats):
+                for case in cases:
+                    run_home = _run_home(home, ARMS[arm_name])
+                    try:
+                        for row in execute(run_home, case, arm_name, repeat):
+                            sink.write(json.dumps(row, ensure_ascii=False) + "\n")
                             sink.flush()
-                            print(f"{arm_name} r{repeat} {case['id']}: ERROR {error['error']}", flush=True)
-    finally:
-        if original is not None:
-            from hermes_cli.config import atomic_config_write
+                            if row["kind"] == "turn":
+                                print(f"{row['arm']} r{repeat} {row['case']} s{row['session']} t{row['turn']}: "
+                                      f"{row['wall_s']}s calls={row['api_calls']} "
+                                      f"blocked={row['blocked_tool_calls']} "
+                                      f"checks={sum(c['ok'] for c in row['checks'])}/{len(row['checks'])}",
+                                      flush=True)
+                            elif row["kind"] == "error":
+                                print(f"{arm_name} r{repeat} {case['id']}: ERROR {row['error']}", flush=True)
+                    except Exception as exc:  # one broken case is recorded; hours of other cases are kept
+                        error = _error_row(case, arm_name, repeat, exc)
+                        sink.write(json.dumps(error, ensure_ascii=False) + "\n")
+                        sink.flush()
+                        print(f"{arm_name} r{repeat} {case['id']}: ERROR {error['error']}", flush=True)
+                    finally:
+                        _close_run_home(run_home, home)
 
-            atomic_config_write(home / "config.yaml", original)
+
+def _serve_case() -> None:
+    """Inside the confinement: the one case run the runner sent on stdin; each row goes to stdout
+    after the one-time key it came with."""
+    job = json.loads(sys.stdin.read())
+    key, case, arm_name, repeat = job["key"], job["case"], job["arm"], job["repeat"]
+    try:
+        for row in _run_case(case, arm_name, repeat, Path(os.environ["HERMES_HOME"])):
+            print(f"{key}\t{json.dumps(row, ensure_ascii=False)}", flush=True)
+    except Exception as exc:
+        print(f"{key}\t{json.dumps(_error_row(case, arm_name, repeat, exc), ensure_ascii=False)}", flush=True)
 
 
 def summarize(path: Path) -> dict:
@@ -384,19 +445,21 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--set", dest="case_set", default="dev", choices=["dev", "holdout", "all"])
     parser.add_argument("--summarize", type=Path)
+    parser.add_argument("--run-case", action="store_true", help=argparse.SUPPRESS)  # the confined child only
     args = parser.parse_args(argv)
     if args.init_home:
         init_home(args.init_home)
     elif args.summarize:
         print(json.dumps(summarize(args.summarize), ensure_ascii=False, indent=2))
-    elif args.home and args.cases and args.out:
+    elif args.run_case:
         if os.environ.get(sandbox.MARKER_ENV) != "1":
-            _check_home(args.home)
-            if not sandbox.available():
-                sys.exit("the real-model evaluation runs only confined (macOS sandbox-exec); none is available here")
-            options = ["--arms", args.arms, "--repeats", str(args.repeats), "--set", args.case_set]
-            sys.exit(sandbox.rerun_confined(eval_home=args.home, cases=args.cases, out=args.out, options=options))
-        run(args.home, args.cases, args.out, arms=args.arms.split(","), repeats=args.repeats, case_set=args.case_set)
+            sys.exit("--run-case runs only inside the confinement the runner sets up")
+        _serve_case()
+    elif args.home and args.cases and args.out:
+        if not sandbox.available():
+            sys.exit("the real-model evaluation runs only confined (macOS sandbox-exec); none is available here")
+        run(args.home, args.cases, args.out, arms=args.arms.split(","), repeats=args.repeats, case_set=args.case_set,
+            execute=partial(sandbox.run_case, eval_home=args.home, unreadable=(args.cases, args.out)))
     else:
         parser.error("use --init-home, --summarize, or --home/--cases/--out")
 

@@ -99,7 +99,7 @@ def test_the_confinement_keeps_a_run_inside_the_eval_home(tmp_path):
     agent.write_text(f"#!/bin/sh\ntouch '{tmp_path / 'agent-ran'}'\n", encoding="utf-8")
     agent.chmod(0o755)
     profile = tmp_path / "run.sb"
-    profile.write_text(sandbox.profile(eval_home=eval_home, repo=Path(sandbox.__file__).resolve().parents[2], home=home,
+    profile.write_text(sandbox.profile(run_home=eval_home, repo=Path(sandbox.__file__).resolve().parents[2], home=home,
                                        python_root=Path(sys.executable).resolve().parents[1], denied=[agent],
                                        protected=[data]), encoding="utf-8")
     script = (f"echo ok > '{eval_home}/w' && echo EVAL_HOME_WRITABLE\n"
@@ -131,14 +131,54 @@ def test_the_evaluation_runs_confined_and_a_coding_agent_is_only_a_stand_in(tmp_
 
     with FakeLLMServer(script) as server:
         write_hermes_home(home, server.base_url, extra_config=_NO_BORROWED_LOGINS)
-        with pytest.raises(SystemExit) as exit_:
-            runner.main(["--home", str(home), "--cases", str(cases), "--out", str(out), "--arms", "off",
-                         "--repeats", "1"])
+        runner.main(["--home", str(home), "--cases", str(cases), "--out", str(out), "--arms", "off", "--repeats", "1"])
 
-    assert exit_.value.code == 0
     (row,) = [r for r in map(json.loads, out.read_text(encoding="utf-8").splitlines()) if r["kind"] == "turn"]
     assert any("claude -p" in call for call in row["calls"])
     assert sandbox.command_log(home) == ["claude -p refactor the parser"]
+
+
+@pytest.mark.macos_only
+def test_a_case_run_sees_neither_the_cases_nor_another_case_run(tmp_path):
+    """The model under evaluation cannot read the cases and their checks (a made-up holdout here),
+    the results so far, or anything an earlier case run left: each run has its own home, removed
+    when it ends, and the cases stay with the runner."""
+    from evals.cognition_v2 import runner
+
+    home = tmp_path / "eval-home"
+    runner.init_home(home)
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text("".join(json.dumps(case, ensure_ascii=False) + "\n" for case in (
+        {"id": "plant", "set": "dev", "files": {"note.txt": "NEIGHBOR-7c1e"}, "turns": ["記住代號 NEIGHBOR-7c1e"]},
+        {"id": "probe", "set": "dev", "turns": ["找找看"]},
+        {"id": "secret", "set": "holdout", "turns": ["HOLDOUT-5b9d"], "expect": [{"answer_has": "HOLDOUT-5b9d"}]},
+    )), encoding="utf-8")
+    out = tmp_path / "rows.jsonl"
+    probes = [ToolCall("terminal", {"command": f"cat '{cases}'"}), ToolCall("terminal", {"command": f"cat '{out}'"}),
+              ToolCall("terminal", {"command": f"grep -ra NEIGHBOR-7c1e '{home}' | head -5"}),
+              ToolCall("terminal", {"command": f"ls -R '{home}' | head -40"}),
+              ToolCall("search_files", {"path": str(home), "pattern": "NEIGHBOR-7c1e", "target": "content"})]
+
+    def respond(record):
+        body = record["body"]
+        asked = [str(m.get("content")) for m in body["messages"] if m.get("role") == "user"][-1]
+        if "NEIGHBOR-7c1e" in asked:
+            return Text("好，代號 NEIGHBOR-7c1e 記住了。")
+        done = sum(m.get("role") == "tool" for m in body["messages"])
+        return probes[done] if done < len(probes) else Text("找完了。")
+
+    with FakeLLMServer(respond) as server:
+        write_hermes_home(home, server.base_url, extra_config=_NO_BORROWED_LOGINS)
+        runner.main(["--home", str(home), "--cases", str(cases), "--out", str(out), "--arms", "off", "--repeats", "1"])
+        seen = [str(m.get("content")) for body in server.main_requests() for m in body["messages"]
+                if m.get("role") == "tool"]
+
+    assert len(seen) >= len(probes)  # every probe ran and came back
+    assert not any(marker in result for result in seen for marker in ("NEIGHBOR-7c1e", "HOLDOUT-5b9d", "note.txt"))
+    assert not any((home / "runs").iterdir())  # nothing a case run left behind
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert [(r["kind"], r["case"]) for r in rows] == [("turn", "plant"), ("case", "plant"), ("turn", "probe"),
+                                                       ("case", "probe")]
 
 
 def test_without_confinement_the_evaluation_does_not_run(tmp_path, monkeypatch):
