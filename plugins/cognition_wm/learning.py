@@ -25,10 +25,10 @@ from plugins.cognition_wm.lessons import (
     LessonCue,
     correction_kind,
     draft_lesson,
+    named,
     read_cue,
     same_topic,
     same_wording,
-    search_terms,
     work_kind,
 )
 from plugins.cognition_wm.model import Experience, SourceRef, Task, clip
@@ -145,7 +145,8 @@ def _put_in_force_if_voiced_elsewhere(wm: ExperienceStore, lesson: Experience, o
 def _state_lesson(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue, *, focus: Optional[Task],
                   steps: Sequence[str], request: str, shown: Sequence[str], model: str, provider: str,
                   **_: Any) -> list[str]:
-    """A directive or correction: said again, it counts once more; revised, it replaces the old one."""
+    """A directive or correction: said again (the same words and the same exception), it counts once
+    more; revised in any way, it replaces the old one."""
     if cue.loosens:
         return []  # a permission, never a lesson: the task's authorization rules keep it
     owner = _owner(state)
@@ -157,7 +158,8 @@ def _state_lesson(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue,
     live = [e for e in wm.experiences(project_key=state.project_key, statuses=_LIVE,
                                       include_global=draft.scope == "global") if e.scope == draft.scope]
     match = next((e for e in reversed(live) if same_topic(topic, frozenset(e.lesson_key.split()))), None)
-    if match is not None and same_wording(match.behavior, draft.behavior):
+    if match is not None and same_wording(match.behavior, draft.behavior) and same_wording(match.exceptions,
+                                                                                            draft.exceptions):
         wm.add_signal(match.experience_id, source_class=source_class, polarity=1, evidence_key=key, source=owner,
                       lineage=state.lineage_root, detail=cue.text)
         _put_in_force_if_voiced_elsewhere(wm, match, owner, state.lineage_root)
@@ -192,25 +194,31 @@ def _spoken_here(wm: ExperienceStore, state: runtime.TurnState, statuses: Sequen
 
 def _which(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue, *, shown: Sequence[str],
            previous_turn: Optional[str], statuses: Sequence[str]) -> tuple[Optional[Experience], list[Experience]]:
-    """The lesson an owner's confirm or revoke is about: among the lessons shown last turn (else those
-    of this conversation), the one their words name, else the only one, else — for a confirm — the
-    one made in the turn they answer. Returns it, or the lessons it could be when that cannot be told."""
+    """The lesson an owner's confirm or revoke is about. Named (by its id or its words): a lesson of
+    this project, or one held everywhere, that matches — none matching picks nothing. Only pointed at:
+    among the lessons shown last turn (else those of this conversation), the only one, else — for a
+    confirm — the one made in the turn they answer. Returns it, or the lessons it could be."""
+    ids, words = named(cue)
+    if ids or words:
+        maybe = [e for e in wm.experiences(project_key=state.project_key, statuses=statuses)
+                 if e.experience_id in ids or words & set(e.tags)]
+        return (maybe[0], []) if len(maybe) == 1 else (None, maybe[:5])
     pool = [e for e in filter(None, (wm.experience(i) for i in shown)) if e.status in statuses]
     pool = pool or _spoken_here(wm, state, statuses)
-    words = set(search_terms(cue.text))
-    maybe = [e for e in pool if words & set(e.tags)] or pool
-    if len(maybe) == 1:
-        return maybe[0], []
-    recent = [e for e in maybe if previous_turn and e.origin.turn_id == previous_turn]
+    if len(pool) == 1:
+        return pool[0], []
+    recent = [e for e in pool if previous_turn and e.origin.turn_id == previous_turn]
     if cue.kind == "confirmation" and len(recent) == 1:
         return recent[0], []
-    return None, maybe[:5]
+    return None, pool[:5]
 
 
 def _pending(state: runtime.TurnState, op: str, cue: LessonCue, maybe: Sequence[Experience]) -> list[str]:
-    """Unsure which lesson the owner means: the model may settle one of these, once, or ask."""
+    """Unsure which lesson the owner means: the model may settle one of these, once, or ask. A lesson
+    they named that matches none is asked about, never guessed."""
     if not maybe:
-        return []
+        return ([f'The user asked to {op} a lesson ("{clip(cue.text, 120)}") that matches none kept for this '
+                 'project: ask them which one they mean.'] if any(named(cue)) else [])
     state.notes[INTENT_NOTE] = {"op": op, "ids": [e.experience_id for e in maybe]}
     choices = "; ".join(f'{e.experience_id} "{clip(e.behavior, 60)}"' for e in maybe)
     return [f'Pending: the user asked to {op} a lesson ("{clip(cue.text, 120)}") without saying which. If it is one '
@@ -352,11 +360,13 @@ def _after_turn(state: runtime.TurnState, answer: str, history: Sequence[Any], *
     # The same check seen again counts once in a conversation until something changes, however the
     # model splits the work into tasks.
     scope_key = f"conv:{state.lineage_root}:g{_changes(wm, state, report)}"
-    drafts = outcomes.turn_outcomes(report, model=model, scope_key=scope_key,
+    actor = "|".join((model or "unknown-model", provider or "", runtime.environment(model, provider)["hermes_version"]))
+    drafts = outcomes.turn_outcomes(report, model=model, scope_key=scope_key, actor=actor,
                                     turn_key=f"{state.session_id}:{state.turn_id}")
     recorded: dict[str, str] = {}
     if current.calibration:
-        recorded = _record(wm, state, report, drafts, task=task, finished=finished, model=model, provider=provider)
+        recorded = _record(wm, state, report, drafts, task=task, finished=finished, model=model, provider=provider,
+                           actor=actor)
         wm.set_meta(LAST_TURN_KEY.format(state.lineage_root), json.dumps(
             {"session": state.session_id, "turn": state.turn_id, "outcomes": sorted(set(recorded.values()))}))
     if current.learning:
@@ -376,7 +386,7 @@ def _changes(wm: ExperienceStore, state: runtime.TurnState, report: Any) -> int:
 
 
 def _record(wm: ExperienceStore, state: runtime.TurnState, report: Any, drafts: Sequence[outcomes.OutcomeDraft], *,
-            task: Optional[Task], finished: Sequence[Task], model: str, provider: str) -> dict[str, str]:
+            task: Optional[Task], finished: Sequence[Task], model: str, provider: str, actor: str) -> dict[str, str]:
     """Record this turn's claimed results, and let our own checks settle earlier reports about what
     they checked. Returns each result's key -> the record it rests on (for a rerun, the first one)."""
     version = runtime.environment(model, provider)["hermes_version"]
@@ -396,16 +406,18 @@ def _record(wm: ExperienceStore, state: runtime.TurnState, report: Any, drafts: 
         deliverables = wm.items(done.task_id, kinds=("deliverable",))
         backed = bool(deliverables) and all(
             item.state == "dropped" or (item.state == "done" and set(item.evidence_ids) & verified) for item in deliverables)
-        wm.record_outcome(evidence_key=f"task:{done.task_id}:done", task_id=done.task_id, task_kind=done.kind,
+        wm.record_outcome(evidence_key=f"task:{done.task_id}:done:{actor}", task_id=done.task_id, task_kind=done.kind,
                           claim_class="task", actor_kind="self", actor_id=model or "unknown-model",
                           result="success" if backed else "unknown", reason="" if backed else "done_without_evidence",
                           intervention={**asked, "user_turns": wm.owner_turns(done.task_id)}, **common)
-        keys.append(f"task:{done.task_id}:done")
-    # a subagent's or coding agent's earlier report in the same work: settled only by a check of ours
-    # about what it names, never by one about something else
+        keys.append(f"task:{done.task_id}:done:{actor}")
+    # a subagent's or coding agent's report of an earlier turn in the same work: settled only by a check
+    # of ours about what it names, never by one about something else (this turn's were settled above,
+    # by our checks after them)
     earlier = wm.outcomes(task_id=task.task_id) if task else wm.outcomes(session_id=state.session_id)
     for old in earlier:
-        if old.actor_kind != "self" and old.result == "reported" and old.claim:
+        if (old.actor_kind != "self" and old.result == "reported" and old.claim
+                and (old.session_id, old.turn_id) != (state.session_id, state.turn_id)):
             result, ids = outcomes.settle_report(old.claim, report.evidence)
             if result != "reported":
                 wm.relabel_outcomes([old.outcome_id], result, source=_checked_by_us(state, ids[-1]))

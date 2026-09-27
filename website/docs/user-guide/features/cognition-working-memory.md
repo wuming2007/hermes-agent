@@ -85,12 +85,15 @@ own words teach:
   project; for every project only when you say so.
 - A correction ("不對，要用 uv run pytest") is kept on trial. It is put in force when you repeat it in
   another conversation or confirm it ("對，以後都這樣"), or, for a command, after it was followed
-  and worked in two tasks: the model ran that command itself (printing it does not count) and the
-  run backs a result that held. Said again in the same conversation it counts once; revised or
-  turned around ("never use …" after "always use …"), it replaces the old lesson.
-- "那條規則不對，忘掉它" / "forget that rule" withdraws the lesson just shown. When it is not clear
-  which lesson you mean, the model may settle one of the lessons you were shown — once — or ask;
-  it cannot use your "yes" for a lesson it proposes itself.
+  and worked in two tasks: the model ran that command itself (printing it, or `! cmd`, does not
+  count) and the run backs a result that held. Said again word for word (with the same exception)
+  it counts once more; any other wording — a turned direction, a moved "not", another exception —
+  replaces the old lesson.
+- "那條規則不對，忘掉它" / "forget that rule" withdraws the lesson just shown. "Forget the rule about
+  ruff" (or its id) withdraws that one, even if another was shown; a name that matches no lesson of
+  this project is asked about, never guessed. When it is not clear which lesson you mean, the model
+  may settle one of the lessons you were shown — once — or ask; it cannot use your "yes" for a
+  lesson it proposes itself. Confirming works the same way.
 - Words that would drop a check or an approval ("以後推 repo 不用問", "deploy without approval") are
   never learned, from you or from the model — they are a permission, and permissions stay with the
   task's authorization rules. A stricter wish ("never deploy without approval") is kept. Saying an
@@ -109,10 +112,13 @@ shown (for a confirmation, or for the credit of following them).
 **Track record.** Each state claim the model makes is recorded with how it held up (backed by our
 own check, failed, or unverified; later corrected or confirmed by you), per task kind, model,
 provider and Hermes version — never pooled. A subagent's or coding agent's report counts for that
-agent as "reported" until our own check of what the report names confirms or refutes it (a check
-of `test_b` says nothing about a report on `test_a`). The same check run again counts once, on its
-first record, and your correction lands there; the same command on another file, port or id is
-another check. With fewer than
+agent as "reported" until our own check, after the report, of what the report names confirms or
+refutes it: a check of `test_b` says nothing about a report on `test_a`, a report on both needs
+both, and a check made before the report says nothing about it. A command that only prints or
+searches (`echo 'uv run pytest'`) is not a test run, and `! cmd` does not show that `cmd` passed.
+The same check run again by the same model counts once, on its first record, and your correction
+lands there; another model's rerun, or the same command on another file, port or id, is its own
+record. With fewer than
 `calibration_min_samples` results it says nothing. When the record for the kind of work in focus
 is poor, the turn gets one line ("check it and read the result before you say so") and the full
 answer check (one auxiliary call); a good record never relaxes anything, and chat outside a task
@@ -169,7 +175,8 @@ them without touching the working memory.
   can count as one. Whether a real model follows a lesson is measured by the evaluation, not
   assumed.
 - Lessons are kept only in this profile's working-memory database. A memory or skill write that
-  carries their markers or repeats a lesson word for word is refused, but the background memory
+  carries their markers or repeats a lesson word for word — one in force, or one withdrawn,
+  replaced or lapsed that is still kept as history — is refused, but the background memory
   review sees earlier turns as they were sent (lessons included, to keep the prompt cache), so a
   reworded copy can still be saved; revoking or forgetting a lesson does not remove such a copy.
 - A report that names nothing in particular ("all tests pass") is settled by our own check of that

@@ -78,16 +78,25 @@ class Chat:
     def __exit__(self, *_exc) -> None:
         self.server.stop()
 
-    def turn(self, session_id: str, message: str) -> dict:
+    def turn(self, session_id: str, message: str, model: str = "fake-model") -> dict:
         from run_agent import AIAgent
 
-        agent = AIAgent(provider="custom", base_url=self.server.base_url, api_key="sk-fake", model="fake-model",
+        agent = AIAgent(provider="custom", base_url=self.server.base_url, api_key="sk-fake", model=model,
                         session_db=self.db, session_id=session_id, quiet_mode=True, platform="cli",
                         enabled_toolsets=_TOOLSETS, skip_context_files=True, skip_memory=True)
         return agent.run_conversation(message, conversation_history=self.db.get_messages_as_conversation(session_id))
 
     def cmd(self, line: str) -> str:
         return f"{self.bin}/{line}"
+
+    def stand_in(self, name: str, output: str, status: int = 0) -> None:
+        script = self.bin / name
+        script.write_text(f"#!/bin/sh\necho '{output}'\nexit {status}\n", encoding="utf-8")
+        script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+    def last_user_row(self) -> str:
+        body = self.server.main_requests()[-1]
+        return next(str(m.get("content")) for m in reversed(body["messages"]) if m.get("role") == "user")
 
 
 def _store():
@@ -469,3 +478,138 @@ def test_a_long_running_process_keeps_its_limits_checking_at_most_hourly(tmp_pat
         chat.turn("s1", "謝謝")
 
     assert (within_the_hour, _store().experience(second.experience_id).status) == ("candidate", "expired")
+
+
+# ------------------------------------------------------------------ second review round (2026-09-27)
+
+
+def _said_here(behavior: str, tags: tuple, *, status: str, session: str = "s1") -> str:
+    """A lesson the owner stated earlier in conversation ``session``."""
+    from plugins.cognition_wm import runtime
+    from plugins.cognition_wm.lessons import topic_terms
+    from plugins.cognition_wm.model import SourceRef
+
+    said = SourceRef(type="user_message", session_id=session, turn_id="t0", ref="m", at=time.time(),
+                     authored_by="owner", run_id="run-a")
+    return _store().add_experience(
+        kind="procedure", scope="project", project_key=runtime.project_key(), task_kind=None, situation="this project",
+        behavior=behavior, tags=tags, lesson_key=" ".join(sorted(topic_terms(behavior))), status=status,
+        origin=said).experience_id
+
+
+def test_turning_a_wish_around_replaces_it_even_when_most_words_stay(tmp_path, monkeypatch):
+    before = ("Before every release, always run the full test suite with uv run pytest and then copy source to "
+              "destination.")
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        script += [_task(), _terminal(chat.cmd("pytest -q")), Text("測試都通過了。")]
+        chat.turn("s1", "幫我跑測試")
+        chat.turn("s1", before)
+        (old,) = _live()
+        chat.turn("s1", before.replace("copy source to destination", "copy destination to source"))
+
+    (new,) = _live()
+    assert new.experience_id != old.experience_id and "copy destination to source" in new.behavior
+    assert _store().experience(old.experience_id).status == "superseded"
+    assert [s.polarity for s in _store().signals(old.experience_id)] == [1]
+
+
+def test_changing_only_the_exception_replaces_the_lesson_and_the_new_one_is_recalled(tmp_path, monkeypatch):
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        script += [_task(), _terminal(chat.cmd("pytest -q")), Text("測試都通過了。")]
+        chat.turn("s1", "幫我跑測試")
+        chat.turn("s1", "Always use uv run pytest except for docs.")
+        (docs,) = _live()
+        chat.turn("s1", "Always use uv run pytest except for integration.")
+        (integration,) = _live()
+        chat.turn("s2", "跑一下測試")
+        row = chat.last_user_row()
+
+    assert integration.experience_id != docs.experience_id and "integration" in integration.exceptions
+    assert _store().experience(docs.experience_id).status == "superseded"
+    assert "except for integration" in row and "except for docs" not in row
+
+
+def test_a_withdrawal_that_names_a_lesson_drops_that_one_or_asks(tmp_path, monkeypatch):
+    """Only the pytest lesson was shown; "the rule about ruff" is the other one, and a name that
+    matches no lesson is asked about, never guessed."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        pytest_rule = _said_here("use `uv run pytest`", ("測試", "pytest"), status="active")
+        ruff_rule = _said_here("format with `ruff format`", ("格式", "ruff"), status="active")
+        chat.turn("s1", "跑一下測試")  # shows the pytest lesson only
+        chat.turn("s1", "Forget the rule about black.")
+        unmatched = [_store().experience(i).status for i in (pytest_rule, ruff_rule)]
+        chat.turn("s1", "Forget the rule about ruff.")
+
+    assert unmatched == ["active", "active"]
+    assert [_store().experience(i).status for i in (pytest_rule, ruff_rule)] == ["active", "revoked"]
+
+
+def test_a_confirmation_that_names_a_lesson_settles_that_one(tmp_path, monkeypatch):
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        pytest_rule = _said_here("use `uv run pytest`", ("測試", "pytest"), status="candidate")
+        ruff_rule = _said_here("format with `ruff format`", ("格式", "ruff"), status="candidate")
+        chat.turn("s1", "跑一下測試")  # shows the pytest lesson only
+        chat.turn("s1", "Yes, do it that way for ruff.")
+
+    assert [_store().experience(i).status for i in (pytest_rule, ruff_rule)] == ["candidate", "active"]
+
+
+def test_our_check_before_a_report_does_not_verify_it(tmp_path, monkeypatch):
+    """We deployed, then a coding agent says it deployed: nothing of ours came after its word."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        chat.stand_in("deploy.sh", "deployed")
+        chat.stand_in("claude", "Deployed to production.")
+        script += [_terminal(chat.cmd("deploy.sh")), _terminal(chat.cmd("claude -p 'deploy the app'")),
+                   Text("Claude 回報已部署到正式環境。")]
+        chat.turn("s1", "部署，再請 claude 也部署一次")
+
+    (report,) = _store().outcomes(actor_kind="external_agent")
+    assert (report.claim_class, report.result) == ("deployed", "reported")
+
+
+def test_a_report_on_two_files_needs_our_check_of_both(tmp_path, monkeypatch):
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        chat.stand_in("claude", "test_a.py and test_b.py tests pass.")
+        script += [_terminal(chat.cmd("claude -p 'fix test_a.py and test_b.py'")), Text("Claude 回報兩個檔案的測試都通過。"),
+                   _terminal(chat.cmd("pytest tests/test_a.py")), Text("test_a.py 的測試通過。")]
+        chat.turn("s1", "請 claude 修 test_a.py 和 test_b.py")
+        chat.turn("s1", "跑 test_a 的測試")
+        one = _store().outcomes(actor_kind="external_agent")[0].result
+        script += [_terminal(chat.cmd("pytest tests/test_a.py tests/test_b.py")), Text("兩個檔案的測試都通過。")]
+        chat.turn("s1", "兩個都跑")
+
+    assert (one, _store().outcomes(actor_kind="external_agent")[0].result) == ("reported", "success")
+
+
+def test_the_same_check_by_another_model_is_that_models_own_record(tmp_path, monkeypatch):
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        script += [_terminal(chat.cmd("pytest -q")), Text("測試都通過了。"),
+                   _terminal(chat.cmd("pytest -q")), Text("測試都通過了。"), Text("抱歉，我再確認。")]
+        chat.turn("s1", "幫我跑測試", model="model-a")
+        chat.turn("s1", "再跑一次", model="model-b")
+        chat.turn("s1", "不對，測試根本沒過", model="model-b")
+
+    assert {o.actor_id: o.result for o in _store().outcomes(actor_kind="self")} == {"model-a": "success",
+                                                                                  "model-b": "corrected"}
+
+
+def test_printing_a_test_command_is_not_a_passing_test_ours_or_a_reports(tmp_path, monkeypatch):
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        script += [_terminal("echo 'uv run pytest'"), Text("測試都通過了。"),
+                   _terminal(chat.cmd("claude -p 'fix the flaky test'")), Text("Claude 回報測試都通過了。"),
+                   _terminal("echo 'pytest -q'"), Text("我確認過了，測試通過。")]
+        chat.turn("s1", "幫我跑測試")
+        ours = [o.result for o in _store().outcomes(actor_kind="self")]
+        chat.turn("s1", "請 claude 修不穩的測試")
+        chat.turn("s1", "你自己確認一下")
+
+    assert "success" not in ours
+    assert _store().outcomes(actor_kind="external_agent")[0].result == "reported"

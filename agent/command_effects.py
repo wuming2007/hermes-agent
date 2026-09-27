@@ -293,18 +293,22 @@ _LIST_OPS = frozenset({";", "\n", "&"})
 _OPAQUE_OPS = frozenset({"(", ")", "$(", "`"})
 _ERREXIT = re.compile(r"^set\s+(?:-\w*e\w*|-o\s+errexit)\b")
 _PIPEFAIL = re.compile(r"^set\s+(?:-\w+\s+)*-o\s+pipefail\b|^set\s+-\w*o\w*\s+pipefail\b")
+_NEGATED = re.compile(r"^!\s")  # `! cmd`: the pipeline's status turned around
 
 
-def _and_or_confirmed(pipelines: list[list[int]], ops: list[str], pipefail: bool) -> set[int]:
+def _and_or_confirmed(pipelines: list[list[int]], ops: list[str], pipefail: bool,
+                      negated: frozenset = frozenset()) -> set[int]:
     """Steps of one ``&&``/``||`` list whose success its status 0 shows. The list is left-associative:
     ``… && last`` shows ``last`` and whatever the part before shows; ``… || last`` shows nothing, since
-    ``last`` ran only if the part before failed. A pipeline shows its last command (all under pipefail)."""
+    ``last`` ran only if the part before failed. A pipeline shows its last command (all under pipefail);
+    a negated one (``! cmd``) shows none, since its status 0 says ``cmd`` failed."""
     shown: set[int] = set()
     i = len(pipelines) - 1
     while True:
         if i > 0 and ops[i - 1] != "&&":
             return shown
-        shown.update(pipelines[i] if pipefail else pipelines[i][-1:])
+        if pipelines[i][0] not in negated:
+            shown.update(pipelines[i] if pipefail else pipelines[i][-1:])
         if i == 0:
             return shown
         i -= 1
@@ -327,9 +331,10 @@ def _confirmed(parts: list[tuple[str, str]]) -> set[int]:
         elif op in _LIST_OPS:
             lists.append(([[]], []))
     lists = [(pipelines, ops) for pipelines, ops in lists if all(pipelines)]
+    negated = frozenset(position for position, step, _op in steps if _NEGATED.match(step))
     shown: set[int] = set()
     for pipelines, ops in (lists if errexit else lists[-1:]):  # under set -e a failing list ends the run
-        shown |= _and_or_confirmed(pipelines, ops, pipefail)
+        shown |= _and_or_confirmed(pipelines, ops, pipefail, negated)
     return shown
 
 

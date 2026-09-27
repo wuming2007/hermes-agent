@@ -98,10 +98,13 @@ def reporter(item: EvidenceItem) -> tuple[str, str]:
     return "subagent", f"subagent:{found.group(1)}" if found else "subagent"
 
 
-def turn_outcomes(report: EvidenceReport, *, model: str, scope_key: str, turn_key: str) -> list[OutcomeDraft]:
+def turn_outcomes(report: EvidenceReport, *, model: str, scope_key: str, turn_key: str,
+                  actor: str = "") -> list[OutcomeDraft]:
     """One draft per claim class and actor for this turn, the worst reading winning. ``scope_key``
-    is the task (or conversation) the claims belong to: a check seen again within it counts once.
-    ``turn_key`` is this turn: a claim with nothing behind it counts once per turn."""
+    is the task (or conversation) the claims belong to, and ``actor`` who made them (model, provider
+    and Hermes version): a check seen again within it by the same actor counts once, and another
+    model's rerun is that model's own record. ``turn_key`` is this turn: a claim with nothing behind
+    it counts once per turn. A report is settled only by our checks after it."""
     by_id = {item.evidence_id: item for item in report.evidence}
     drafts: list[OutcomeDraft] = []
     for check in report.claims:
@@ -111,7 +114,7 @@ def turn_outcomes(report: EvidenceReport, *, model: str, scope_key: str, turn_ke
         if items and all(i.kind == "delegate_report" for i in items):
             continue  # a relayed report counts for whoever reported it, below
         result = "success" if check.supported else _SELF_RESULTS.get(check.reason, "unknown")
-        key = (f"self:{scope_key}:{check.claim_class}:{_content(items)}" if items and result != "unknown"
+        key = (f"self:{scope_key}:{actor}:{check.claim_class}:{_content(items)}" if items and result != "unknown"
                else f"self:{turn_key}:{check.claim_class}")
         drafts.append(OutcomeDraft(check.claim_class, "self", model or "unknown-model", result, check.reason,
                                    tuple(i.evidence_id for i in items), key))
@@ -128,7 +131,7 @@ def turn_outcomes(report: EvidenceReport, *, model: str, scope_key: str, turn_ke
             said.setdefault(claim.claim_class, []).append(claim.sentence)
         for claim_class, sentences in said.items():
             words = " ".join(sentences)[:300]
-            result, _ids = settle_report(words, report.evidence)
+            result, _ids = settle_report(words, [later for later in report.evidence if later.index > item.index])
             drafts.append(OutcomeDraft(claim_class, actor_kind, actor_id, result,
                                        "checked" if result != "reported" else "only_subagent_report",
                                        (item.evidence_id,), f"report:{item.evidence_id}:{claim_class}", claim=words))
@@ -136,10 +139,11 @@ def turn_outcomes(report: EvidenceReport, *, model: str, scope_key: str, turn_ke
 
 
 def settle_report(claim: str, evidence: Sequence[EvidenceItem]) -> tuple[str, tuple[str, ...]]:
-    """What our own checks among ``evidence`` say about a subagent's or coding agent's report
-    (``claim``, its own words): by the rule our own claims are held to, so a check counts only when it
-    is about what the report names and came after it. Success when every claim holds, failure when a
-    check of what it names failed, else it stays reported. Returns the result and our checks' ids."""
+    """What our own checks among ``evidence`` — the results that came after the report — say about a
+    subagent's or coding agent's report (``claim``, its own words), by the rule our own claims are held
+    to: a check counts only when it is about what the report names, each of them. Success when every
+    claim holds, failure when a check of what it names failed, else it stays reported. Returns the
+    result and our checks' ids."""
     own = {item.evidence_id for item in evidence if item.provenance == "self" and item.kind != "delegate_report"}
     checks = check_claims(claim, evidence)
     backed = [check for check in checks if check.evidence_ids and set(check.evidence_ids) <= own]

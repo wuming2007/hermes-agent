@@ -179,3 +179,13 @@ def test_a_wish_that_drops_an_approval_is_read_as_a_permission(text):
 def test_a_stricter_wish_is_not_a_permission(text):
     cue = read_cue(text)
     assert cue is not None and not cue.loosens
+
+
+@pytest.mark.parametrize("said, again", [
+    ("Before every release, always run the full test suite with uv run pytest and then copy source to destination.",
+     "Before every release, always run the full test suite with uv run pytest and then copy destination to source."),
+    ("Before every release, run uv run pytest on the whole suite, always check the changelog and never skip lint.",
+     "Before every release, run uv run pytest on the whole suite, never check the changelog and always skip lint."),
+])
+def test_a_wish_with_its_direction_turned_is_not_the_same_lesson_again(said, again):
+    assert not same_wording(said, again)

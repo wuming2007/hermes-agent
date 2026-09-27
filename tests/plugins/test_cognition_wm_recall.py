@@ -319,3 +319,33 @@ def test_a_kept_lesson_is_not_copied_into_memory_or_a_skill_even_without_its_mar
 
     assert (memory or {}).get("action") == (skill or {}).get("action") == "block"
     assert unrelated is None
+
+
+def test_a_withdrawn_lesson_is_not_copied_into_memory_word_for_word_either(tmp_path, monkeypatch):
+    """A revoked lesson stays in the store as history; copied word for word into memory it would come back."""
+    from plugins.cognition_wm import scope_gate
+
+    with Project(tmp_path, monkeypatch) as project:
+        project.teach_correction()
+        (lesson,) = _store().experiences()
+        project.turn("day1", "那條規則不對，忘掉它")
+        copy = scope_gate.on_pre_tool_call(tool_name="memory", args={"action": "add",
+                                                                     "content": f"User preference: {lesson.behavior}"})
+
+    assert _store().experience(lesson.experience_id).status == "revoked"
+    assert (copy or {}).get("action") == "block"
+
+
+def test_a_negated_run_is_neither_a_passing_run_nor_following_a_lesson(tmp_path, monkeypatch):
+    """`! uv run pytest` exits 0 because the tests failed."""
+    with Project(tmp_path, monkeypatch) as project:
+        project.teach_correction()
+        (lesson,) = _store().experiences()
+        (project.bin / "uv").write_text("#!/bin/sh\necho '1 failed'\nexit 1\n", encoding="utf-8")
+        project.script += [_task("跑測試 day2"), ToolCall("terminal", {"command": f"! {project.bin}/uv run pytest -q"}),
+                           Text("測試都通過了。")]
+        project.turn("day2", "跑一下測試")
+
+    assert _store().signal_summary(lesson.experience_id).verifications == 0
+    assert [o.result for o in _store().outcomes(session_id="day2", actor_kind="self") if o.claim_class == "tests_pass"] \
+        == ["unknown"]

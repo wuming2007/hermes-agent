@@ -239,11 +239,11 @@ def _written(value: Any, fields: frozenset) -> list[str]:
 
 
 def _copies_a_lesson(text: str, session_id: str) -> bool:
-    """Whether a long-term write repeats, word for word, a lesson Hermes keeps for this project: the
-    copy would outlive the lesson's revocation. A reworded copy is not caught."""
+    """Whether a long-term write repeats, word for word, a lesson Hermes keeps for this project — in
+    force, on trial or ended (revoked, replaced, lapsed: still in the store as history). A copy would
+    outlive the lesson, or bring an ended one back. A reworded copy is not caught."""
     turn = runtime.current_turn(session_id)
-    kept = runtime.store().experiences(project_key=turn.project_key if turn else runtime.project_key(),
-                                       statuses=("candidate", "active", "stale"))
+    kept = runtime.store().experiences(project_key=turn.project_key if turn else runtime.project_key())
     flat = normalized(text)
     return any(len(core) >= 12 and core in flat for core in (normalized(lesson.behavior) for lesson in kept))
 

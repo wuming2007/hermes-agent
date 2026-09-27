@@ -38,6 +38,11 @@ WRITE_BLOCKED = ("write_file", {"path": "app/config.yaml", "content": "x"},
                  {"error": "BLOCKED: Tool 'write_file' requires approval but single-query mode denies it."})
 TEST_OK = ("terminal", {"command": "python -m pytest tests/unit -q"}, {"output": "5 passed", "exit_code": 0, "error": None})
 TEST_FAIL = ("terminal", {"command": "npm test"}, {"output": "1 failed", "exit_code": 1, "error": None})
+TEST_A_ONLY = ("terminal", {"command": "pytest tests/test_a.py"}, {"output": "3 passed", "exit_code": 0, "error": None})
+TEST_A_AND_B = ("terminal", {"command": "pytest tests/test_a.py tests/test_b.py"},
+                {"output": "6 passed", "exit_code": 0, "error": None})
+ECHO_TEST = ("terminal", {"command": "echo 'uv run pytest'"}, {"output": "uv run pytest", "exit_code": 0, "error": None})
+NEGATED_TEST = ("terminal", {"command": "! uv run pytest -q"}, {"output": "1 failed", "exit_code": 0, "error": None})
 RUN_OK = ("terminal", {"command": "python app.py --check"}, {"output": "ok", "exit_code": 0, "error": None})
 DEPLOY_OK = ("terminal", {"command": "launchctl kickstart -k gui/501/com.example.app"},
              {"output": "", "exit_code": 0, "error": None})
@@ -206,6 +211,13 @@ def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, ki
         pytest.param([OLD_SESSION], "截至上次紀錄，已經部署到正式環境。", [], id="old-record-as-of"),
         pytest.param([TEST_OK, AGENT_RUN], "測試全部通過了。", [("tests_pass", "only_subagent_report")],
                      id="own-test-before-the-agent-changed-things"),
+        # each file a claim names must be shown, not just one of them
+        pytest.param([TEST_A_ONLY], "test_a.py and test_b.py tests pass.", [("tests_pass", "target_not_shown")],
+                     id="two-files-one-checked"),
+        pytest.param([TEST_A_AND_B], "test_a.py and test_b.py tests pass.", [], id="two-files-both-checked"),
+        # a command only printed did not run, and `!` turns a failure into exit status 0
+        pytest.param([ECHO_TEST], "測試都通過了。", [("tests_pass", "no_test_evidence")], id="printed-test-command"),
+        pytest.param([NEGATED_TEST], "測試都通過了。", [("tests_pass", "result_not_shown")], id="negated-test-run"),
     ],
 )
 def test_claims_need_evidence_of_their_own_kind(steps, answer, unsupported):

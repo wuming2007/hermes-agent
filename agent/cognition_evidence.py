@@ -112,14 +112,30 @@ _COMMAND_KINDS = (
         r"|git\s+(?:status|diff|log|show|branch|remote|rev-parse))\b")),
 )
 _LEADING_CD = re.compile(r"^\s*(?:cd\s+\S+\s*&&\s*)*")
+# Quoted text is what a command is given, not what runs; and a command that only prints, searches or
+# shows runs no tests and deploys nothing, whatever words it is handed (``echo 'uv run pytest'``).
+_QUOTED_TEXT = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+_SHOWS_ONLY = re.compile(r"^(?:\S*/)?(?:echo|printf|cat|grep|egrep|fgrep|rg|ag|ack|head|tail|less|more|wc|which|type"
+                         r"|whereis|man|file|stat)\b")
+_SEPARATED = re.compile(r"&&|\|\||[;|&\n]")
+_RUNS = frozenset({"test", "deploy"})
 _PROCESS_REPORT_ACTIONS = frozenset({"poll", "wait", "log"})
 _PROCESS_ACTION_KINDS = {"list": "read"}
 
 
 def command_kind(command: str) -> str:
-    """What a shell command does, by its first matching step kind (exec when nothing matches)."""
+    """What a shell command does, by its first matching step kind (exec when nothing matches). A test
+    or a deploy counts only when it is what runs: not quoted text, and not the words handed to a
+    command that only prints or searches."""
     command = _LEADING_CD.sub("", command or "")
-    return next((kind for kind, pattern in _COMMAND_KINDS if pattern.search(command)), "exec")
+    bare = _QUOTED_TEXT.sub("''", command)
+    shows = bool(_SHOWS_ONLY.match(command)) and not _SEPARATED.search(bare)
+    for kind, pattern in _COMMAND_KINDS:
+        if kind in _RUNS and (shows or not pattern.search(bare)):
+            continue
+        if kind in _RUNS or pattern.search(command):
+            return kind
+    return "exec"
 
 
 def matching_command_kinds(command: str) -> frozenset:
@@ -433,6 +449,29 @@ def _mentions(item: EvidenceItem, targets: frozenset) -> bool:
     return any(target in haystack for target in targets)
 
 
+def _listed(targets: frozenset) -> list[str]:
+    """The targets a claim names as things (a file, a path, an id, a version): when it names several,
+    each must be shown, not one of them."""
+    return sorted(t for t in targets if any(c in t for c in "./_") or any(c.isdigit() for c in t))
+
+
+def _each_shown(listed: list[str], about: list[_Effect], support: _Support) -> _Verdict:
+    """A claim naming several things holds only when a result of its own kind shows each of them."""
+    ids = []
+    for target in listed:
+        mine = [e for e in about if _mentions(e.item, frozenset({target}))]
+        if not mine:
+            return False, "target_not_shown", ()
+        landed = [e for e in mine if e.item.status == "ok" and e.shown]
+        chosen = landed[-1] if support.any_landed and landed else mine[-1]
+        if chosen.item.status != "ok":
+            return False, _STATUS_REASONS[chosen.item.status], (chosen.item.evidence_id,)
+        if not chosen.shown:
+            return False, "result_not_shown", (chosen.item.evidence_id,)
+        ids.append(chosen.item.evidence_id)
+    return True, "", tuple(dict.fromkeys(ids))
+
+
 def _subagent_verdict(claim: StateClaim, reports: list[_Effect]) -> _Verdict:
     last = reports[-1]
     ids = (last.item.evidence_id,)
@@ -493,6 +532,9 @@ def _check(claim: StateClaim, items: Sequence[EvidenceItem]) -> _Verdict:
         about = [e for e in relevant if not targets or _mentions(e.item, targets)]
         if not about:
             return False, "target_not_shown", ()
+        listed = _listed(targets)
+        if len(listed) > 1:
+            return _each_shown(listed, about, support)
         landed = [e for e in about if e.item.status == "ok" and e.shown]
         chosen = landed[-1] if support.any_landed and landed else about[-1]
         ids = (chosen.item.evidence_id,)

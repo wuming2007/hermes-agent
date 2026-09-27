@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from typing import Optional, Sequence
 
 from plugins.cognition_wm.model import BEHAVIOR_MAX, EXCEPTIONS_MAX, clip
@@ -96,10 +95,18 @@ _AVOIDS = re.compile(r"\b(?:instead\s+of|rather\s+than|not|never|don'?t(?!\s+for
                      re.IGNORECASE)
 _CLAUSE = re.compile(r"[，,。.;；:：!！?？\n]|\bbut\b|但是?|然後", re.IGNORECASE)
 _ALSO = re.compile(r"^\s*(?:or|and|nor|/|、|和|或|或是|及|跟)?\s*$", re.IGNORECASE)
-# Words that turn a wish around: "never use X" is not "always use X" said again.
-_NEGATES = re.compile(r"不要|不用|不必|不可以|不能|不准|不是|禁止|避免|別|勿"
-                      r"|\b(?:never|not|no|don'?t|doesn'?t|avoid|stop|without|instead)\b", re.IGNORECASE)
-_WORD = re.compile(r"[A-Za-z][\w.+'-]*|[\u3400-\u9fff\uf900-\ufaff]+")
+# Words that only point at a lesson ("forget that rule", "那條規則不對，忘掉它", "yes, keep doing it")
+# and name none: what is left beyond them names one.
+_POINTING = frozenset("""
+about again anymore also any more longer rule rules lesson lessons preference habit approach one ones way please
+yes yeah ok okay sure right exactly correct good great thanks thank keep doing following forget drop remove delete
+stop wrong was were been
+""".split()) | frozenset(phrase[i:i + 2] for phrase in (
+    "那條規則", "這條規則", "那個規則", "這個規則", "那條經驗", "這條經驗", "那個做法", "這個做法", "之前的做法",
+    "上次的做法", "剛才的做法", "那條教訓", "那個偏好", "那個習慣", "忘掉它", "忘記它", "刪掉它", "撤回它",
+    "不要再照", "以後都照這樣", "以後都這樣做", "就照這樣", "保持這樣", "謝謝", "感謝", "麻煩", "拜託", "了解",
+    "知道了", "好的", "沒問題") for i in range(len(phrase) - 1))
+_LESSON_ID = re.compile(r"\bxp_[0-9a-f]{12}\b")
 _EVERYWHERE = re.compile(
     r"所有(?:的)?專案|每個專案|全部(?:的)?專案|任何專案|不管(?:是)?哪個專案|所有地方"
     r"|\beverywhere\b|\bin\s+(?:all|every|any)\s+(?:projects?|repos?(?:itories)?)\b|\bglobally\b", re.IGNORECASE)
@@ -248,26 +255,20 @@ def normalized(text: str) -> str:
     return re.sub(r"[\W_]+", "", (text or "").lower())
 
 
-def _wording(text: str) -> list[str]:
-    """A lesson's words in order, the small ones too: what it says, not only what it is about."""
-    words: list[str] = []
-    for token in _WORD.findall(text or ""):
-        if token.isascii():
-            words.append(token.lower().strip(".-+'"))
-        else:
-            words += [token[i:i + 2] for i in range(len(token) - 1)] or [token]
-    return [word for word in words if word]
-
-
 def same_wording(a: str, b: str) -> bool:
-    """The same lesson said again (punctuation and spacing aside), not a revised or an opposite one:
-    the same words in the same order, and a "not" or an "instead" in one only if the other has it."""
-    if normalized(a) == normalized(b):
-        return True
-    if sorted(m.lower() for m in _NEGATES.findall(a)) != sorted(m.lower() for m in _NEGATES.findall(b)):
-        return False
-    words_a, words_b = _wording(a), _wording(b)
-    return bool(words_a and words_b) and SequenceMatcher(None, words_a, words_b, autojunk=False).ratio() >= 0.8
+    """The same lesson said again: the same words in the same order, case, spacing and punctuation
+    aside. Anything more is a revision — a turned direction ("copy destination to source"), a moved
+    "not", another object — and a revision replaces the lesson; it never counts for the old one."""
+    return normalized(a) == normalized(b)
+
+
+def named(cue: LessonCue) -> tuple[frozenset, frozenset]:
+    """What an owner's confirm or revoke names a lesson by: its id, or words beyond the ones that make
+    it a confirm or a revoke ("forget the rule about ruff": ruff). Both empty when it only points at
+    one ("那條規則不對，忘掉它", "yes, keep doing that")."""
+    rest = dict(_CUES)[cue.kind].sub(" ", cue.text)
+    return (frozenset(_LESSON_ID.findall(cue.text)),
+            frozenset(search_terms(_LESSON_ID.sub(" ", rest))) - _POINTING)
 
 
 def avoided(mentions: Sequence[tuple[int, int]], text: str) -> list[bool]:
