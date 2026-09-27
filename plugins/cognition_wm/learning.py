@@ -406,11 +406,12 @@ def _record(wm: ExperienceStore, state: runtime.TurnState, report: Any, drafts: 
         deliverables = wm.items(done.task_id, kinds=("deliverable",))
         backed = bool(deliverables) and all(
             item.state == "dropped" or (item.state == "done" and set(item.evidence_ids) & verified) for item in deliverables)
-        wm.record_outcome(evidence_key=f"task:{done.task_id}:done:{actor}", task_id=done.task_id, task_kind=done.kind,
+        key = f"task:{done.task_id}:done:{actor}"  # by this model: another one's is its own record
+        wm.record_outcome(evidence_key=key, task_id=done.task_id, task_kind=done.kind,
                           claim_class="task", actor_kind="self", actor_id=model or "unknown-model",
                           result="success" if backed else "unknown", reason="" if backed else "done_without_evidence",
                           intervention={**asked, "user_turns": wm.owner_turns(done.task_id)}, **common)
-        keys.append(f"task:{done.task_id}:done:{actor}")
+        keys.append(key)
     # a subagent's or coding agent's report of an earlier turn in the same work: settled only by a check
     # of ours about what it names, never by one about something else (this turn's were settled above,
     # by our checks after them)

@@ -43,6 +43,10 @@ TEST_A_AND_B = ("terminal", {"command": "pytest tests/test_a.py tests/test_b.py"
                 {"output": "6 passed", "exit_code": 0, "error": None})
 ECHO_TEST = ("terminal", {"command": "echo 'uv run pytest'"}, {"output": "uv run pytest", "exit_code": 0, "error": None})
 NEGATED_TEST = ("terminal", {"command": "! uv run pytest -q"}, {"output": "1 failed", "exit_code": 0, "error": None})
+COMMIT_NAMING_A_RUNNER = ("terminal", {"command": "git commit -m 'make pytest pass'"},
+                          {"output": "[main 1a2b3c4] make pytest pass", "exit_code": 0, "error": None})
+SEARCH_FOR_A_RUNNER = ("terminal", {"command": "grep -rn pytest tests/"},
+                       {"output": "tests/test_x.py:1:import pytest", "exit_code": 0, "error": None})
 RUN_OK = ("terminal", {"command": "python app.py --check"}, {"output": "ok", "exit_code": 0, "error": None})
 DEPLOY_OK = ("terminal", {"command": "launchctl kickstart -k gui/501/com.example.app"},
              {"output": "", "exit_code": 0, "error": None})
@@ -218,6 +222,10 @@ def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, ki
         # a command only printed did not run, and `!` turns a failure into exit status 0
         pytest.param([ECHO_TEST], "測試都通過了。", [("tests_pass", "no_test_evidence")], id="printed-test-command"),
         pytest.param([NEGATED_TEST], "測試都通過了。", [("tests_pass", "result_not_shown")], id="negated-test-run"),
+        pytest.param([COMMIT_NAMING_A_RUNNER], "測試都通過了。", [("tests_pass", "no_test_after_last_write")],
+                     id="commit-message-names-a-runner"),
+        pytest.param([SEARCH_FOR_A_RUNNER], "測試都通過了。", [("tests_pass", "no_test_evidence")],
+                     id="search-for-a-runner"),
     ],
 )
 def test_claims_need_evidence_of_their_own_kind(steps, answer, unsupported):

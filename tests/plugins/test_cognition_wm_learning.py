@@ -613,3 +613,29 @@ def test_printing_a_test_command_is_not_a_passing_test_ours_or_a_reports(tmp_pat
 
     assert "success" not in ours
     assert _store().outcomes(actor_kind="external_agent")[0].result == "reported"
+
+
+def test_a_task_finished_again_by_another_model_is_that_models_own_record(tmp_path, monkeypatch):
+    """Model A finished the task; after the user reopened it, model B finished it again. The user's
+    correction of B's "done" is B's record, not A's."""
+    def status(value: str) -> Callable:
+        def call(_record) -> ToolCall:  # a finished task is out of focus: named by its id
+            from plugins.cognition_wm import runtime
+
+            (task,) = _store().tasks(project_key=runtime.project_key(), lineage_root="s1", open_only=False)
+            return ToolCall("tool_call", {"calls": [{"name": "task_state", "arguments": {
+                "action": "set_status", "status": value, "task_id": task.task_id}}]})
+        return call
+
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        script += [_task(), status("done"), Text("做完了。"),
+                   status("active"), Text("好，繼續。"),
+                   status("done"), Text("做完了。"), Text("抱歉，我再確認。")]
+        chat.turn("s1", "幫我跑測試", model="model-a")
+        chat.turn("s1", "繼續做", model="model-b")
+        chat.turn("s1", "好了嗎", model="model-b")
+        chat.turn("s1", "不對，根本沒完成", model="model-b")
+
+    assert {o.actor_id: o.result for o in _store().outcomes(claim_class="task")} == {"model-a": "unknown",
+                                                                                   "model-b": "corrected"}
