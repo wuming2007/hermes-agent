@@ -349,3 +349,16 @@ def test_a_negated_run_is_neither_a_passing_run_nor_following_a_lesson(tmp_path,
     assert _store().signal_summary(lesson.experience_id).verifications == 0
     assert [o.result for o in _store().outcomes(session_id="day2", actor_kind="self") if o.claim_class == "tests_pass"] \
         == ["unknown"]
+
+
+def test_a_lessons_command_only_printed_beside_another_run_is_not_following_it(tmp_path, monkeypatch):
+    """The line's own test run backs the result; the lesson's command only appears in what it printed."""
+    with Project(tmp_path, monkeypatch) as project:
+        project.teach_correction()
+        (lesson,) = _store().experiences()
+        project.script += [_task("跑測試 day2"),
+                           ToolCall("terminal", {"command": f"{project.bin}/pytest -q && echo 'uv run pytest next time'"}),
+                           Text("測試都通過了。")]
+        project.turn("day2", "跑一下測試")
+
+    assert _store().signal_summary(lesson.experience_id).verifications == 0
