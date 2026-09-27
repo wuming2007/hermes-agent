@@ -6,6 +6,8 @@ Expectations are hand-written literals, never derived from the module under test
 """
 
 import json
+import shutil
+import subprocess
 
 import pytest
 
@@ -85,6 +87,28 @@ NEGATED_IF_CONDITION = ("terminal", {"command": "set -e; if ! uv run pytest -q; 
 SEARCH_OVER_A_SUBSTITUTION = ("terminal", {"command": "grep -rn pytest $(git ls-files)"},
                               {"output": "tests/test_x.py:1:import pytest", "exit_code": 0, "error": None})
 ECHO_WITH_TRAILING_SEMICOLON = ("terminal", {"command": "echo pytest;"}, {"output": "pytest", "exit_code": 0, "error": None})
+NESTED_DEPLOY_WITH_STAGE = ("terminal", {"command": "STAGE=billing bash -c './deploy.sh' && echo done"},
+                            {"output": "done", "exit_code": 0, "error": None})
+STAGE_ONLY_FOR_A_NESTED_NO_OP = ("terminal", {"command": "STAGE=billing bash -c 'true' && ./deploy.sh"},
+                                 {"output": "", "exit_code": 0, "error": None})
+CD_ONLY_INSIDE_A_NESTED_SHELL = ("terminal", {"command": "bash -c 'cd services/billing && npm ci' && npm test"},
+                                 {"output": "added 3 packages\n12 passing", "exit_code": 0, "error": None})
+CD_BEFORE_A_NESTED_SHELL = ("terminal", {"command": "cd services/billing && bash -c 'npm ci && npm test'"},
+                            {"output": "added 3 packages\n12 passing", "exit_code": 0, "error": None})
+NEGATED_IF_IN_BRACES = ("terminal", {"command": "set -e; { if ! uv run pytest -q; then :; fi; }"},
+                        {"output": "1 failed", "exit_code": 0, "error": None})
+NEGATED_IF_BEHIND_TIME_IN_BRACES = ("terminal", {"command": "set -e; { time if ! uv run pytest -q; then :; fi; }"},
+                                    {"output": "1 failed", "exit_code": 0, "error": None})
+NEGATED_TOO_DEEP_TO_READ = ("terminal", {"command": "set -e; " + "{ " * 17 + "! uv run pytest -q; " + "} " * 17},
+                            {"output": "1 failed", "exit_code": 0, "error": None})
+SIXTEEN_LAYERS_READ = ("terminal", {"command": " ".join(f"V{i}=1" for i in range(16)) + " pytest -q"},
+                       {"output": "3 passed", "exit_code": 0, "error": None})
+NEGATED_IN_A_ONE_LINE_FUNCTION = ("terminal", {"command": "set -e; function f { ! uv run pytest -q; }; f"},
+                                  {"output": "1 failed", "exit_code": 0, "error": None})
+CD_BY_EVAL = ("terminal", {"command": "eval 'cd billing' && pytest -q"}, {"output": "3 passed", "exit_code": 0, "error": None})
+PROCESS_LIST = ("process_manage", {"action": "list"},
+                {"processes": [{"session_id": "proc_1", "command": "python billing_worker.py --port 8081",
+                                "status": "running", "pid": 4242, "uptime_seconds": 30, "output_preview": "listening"}]})
 RUN_OK = ("terminal", {"command": "python app.py --check"}, {"output": "ok", "exit_code": 0, "error": None})
 DEPLOY_OK = ("terminal", {"command": "launchctl kickstart -k gui/501/com.example.app"},
              {"output": "", "exit_code": 0, "error": None})
@@ -306,6 +330,27 @@ def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, ki
                      id="negated-after-then"),
         pytest.param([NEGATED_IF_CONDITION], "測試都通過了。", [("tests_pass", "result_not_shown")],
                      id="negated-if-condition"),
+        # what runs a nested shell runs its commands; a cd inside it moves only them
+        pytest.param([NESTED_DEPLOY_WITH_STAGE], "billing 已部署完成。", [], id="the-environment-of-a-nested-shell"),
+        pytest.param([STAGE_ONLY_FOR_A_NESTED_NO_OP], "billing 已部署完成。", [("deployed", "target_not_shown")],
+                     id="a-nested-shells-environment-is-not-its-siblings"),
+        pytest.param([CD_ONLY_INSIDE_A_NESTED_SHELL], "The billing tests pass.", [("tests_pass", "target_not_shown")],
+                     id="a-cd-inside-a-nested-shell-stays-there"),
+        pytest.param([CD_BEFORE_A_NESTED_SHELL], "The billing tests pass.", [], id="a-cd-before-a-nested-shell"),
+        # wrappers and reserved words are read in one pass; what cannot be read to its end shows nothing
+        pytest.param([NEGATED_IF_IN_BRACES], "測試都通過了。", [("tests_pass", "result_not_shown")],
+                     id="negated-if-inside-braces"),
+        pytest.param([NEGATED_IF_BEHIND_TIME_IN_BRACES], "測試都通過了。", [("tests_pass", "result_not_shown")],
+                     id="negated-if-behind-time-inside-braces"),
+        pytest.param([NEGATED_TOO_DEEP_TO_READ], "測試都通過了。", [("tests_pass", "result_not_shown")],
+                     id="negation-too-deep-to-read"),
+        pytest.param([SIXTEEN_LAYERS_READ], "All tests passed.", [], id="sixteen-layers-read-to-the-end"),
+        pytest.param([NEGATED_IN_A_ONE_LINE_FUNCTION], "測試都通過了。", [("tests_pass", "result_not_shown")],
+                     id="negated-inside-a-one-line-function"),
+        # eval runs its words in this shell: its cd moves the commands after it
+        pytest.param([CD_BY_EVAL], "The billing tests pass.", [], id="a-cd-run-by-eval"),
+        # a listing is read whole, like any tool that is not a shell run
+        pytest.param([PROCESS_LIST], "I verified billing_worker.py is running.", [], id="a-process-listing"),
     ],
 )
 def test_claims_need_evidence_of_their_own_kind(steps, answer, unsupported):
@@ -367,6 +412,62 @@ def test_a_background_job_speaks_for_each_of_its_steps_alone():
 
     assert [(c.claim_class, c.reason) for report in (by_notice, by_wait) for c in report.unsupported] == [
         ("tests_pass", "target_not_shown"), ("tests_pass", "target_not_shown")]
+
+
+_NO_OP_NAMES_B = "pytest tests/test_a.py && : tests/test_b.py"
+_VERBOSE_RUN = "pytest -v"
+_BOTH_LISTED = "tests/test_a.py::test_x PASSED\ntests/test_b.py::test_y PASSED"
+_CONTINUED_RUN = "pytest tests/test_a.py \\\n  tests/test_b.py"
+_CONTINUED_NO_OP = "pytest tests/test_a.py && \\\n  : tests/test_b.py"
+
+
+def _job_notice(command, output):
+    return [{"role": "user", "content": "check work"}, {"role": "user", "content": (
+        f"[IMPORTANT: Background process probe completed normally (exit code 0).\nCommand: {command}\n"
+        f"Output:\n{output}\n]")}]
+
+
+def _job_report(action, command, output):
+    field = "output_preview" if action == "poll" else "output"
+    return _turn(("process_manage", {"action": action, "session_id": "probe"},
+                  {"command": command, field: output, "exit_code": 0, "status": "exited"}))
+
+
+@pytest.mark.parametrize("messages, unsupported", [
+    # the job's command is the notice's or the result's metadata, not what the job printed
+    pytest.param(_job_notice(_NO_OP_NAMES_B, "1 passed"), [("tests_pass", "target_not_shown")], id="notice"),
+    pytest.param(_job_report("poll", _NO_OP_NAMES_B, "1 passed"), [("tests_pass", "target_not_shown")], id="poll"),
+    pytest.param(_job_report("wait", _NO_OP_NAMES_B, "1 passed"), [("tests_pass", "target_not_shown")], id="wait"),
+    # what a one-step job printed still names what it ran
+    pytest.param(_job_notice(_VERBOSE_RUN, _BOTH_LISTED), [], id="notice-output-lists-both"),
+    pytest.param(_job_report("poll", _VERBOSE_RUN, _BOTH_LISTED), [], id="poll-output-lists-both"),
+    pytest.param(_job_report("wait", _VERBOSE_RUN, _BOTH_LISTED), [], id="wait-output-lists-both"),
+    # a command over several lines is the job's command in the notice as in the wait
+    pytest.param(_job_notice(_CONTINUED_RUN, "6 passed"), [], id="notice-command-over-two-lines"),
+    pytest.param(_job_report("wait", _CONTINUED_RUN, "6 passed"), [], id="wait-command-over-two-lines"),
+    pytest.param(_job_notice(_CONTINUED_NO_OP, "1 passed"), [("tests_pass", "target_not_shown")],
+                 id="notice-no-op-on-a-second-line"),
+])
+def test_a_background_jobs_output_is_what_it_printed_not_its_command(messages, unsupported):
+    report = build_evidence_report("test_a.py and test_b.py tests pass.", messages)
+
+    assert [(c.claim_class, c.reason) for c in report.unsupported] == unsupported
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.parametrize("body", [
+    pytest.param("set -e; { if ! uv run pytest -q; then :; fi; }", id="if-inside-braces"),
+    pytest.param("set -e; function f { ! uv run pytest -q; }; f", id="inside-a-one-line-function"),
+])
+def test_a_failing_run_negated_inside_braces_is_not_a_pass(body):
+    """The shell's own status: the stand-in fails, `!` turns it into 0 and set -e does not stop."""
+    shell = subprocess.run(["bash", "-c", f"uv() {{ echo '1 failed'; return 1; }}; {body}"],
+                           capture_output=True, text=True, timeout=30)
+    report = build_evidence_report("All tests passed.", _turn(
+        ("terminal", {"command": f"bash -c '{body}'"}, {"output": shell.stdout, "exit_code": shell.returncode})))
+
+    assert (shell.returncode, [(c.claim_class, c.reason) for c in report.unsupported]) == (
+        0, [("tests_pass", "result_not_shown")])
 
 
 def test_runtime_nudges_do_not_start_a_new_turn():

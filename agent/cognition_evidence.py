@@ -43,6 +43,9 @@ class EvidenceItem:
     index: int  # message index of the result row
     kinds: frozenset = frozenset()  # every kind the call covered: `pytest && ./deploy.sh` is test and deploy
     text: str = field(default="", repr=False, compare=False)  # the result as the model saw it
+    # What the call itself printed or returned: a shell result's output, without the command, status or
+    # notice around it; any other tool's whole result.
+    output: str = field(default="", repr=False, compare=False)
     # What the call did, in order: (kind, whether its status shows that step succeeded, the command the
     # step ran). A shell line is one step per command; `pytest || true` ran the tests but its exit 0
     # shows nothing.
@@ -224,31 +227,18 @@ def _unwrap(name: str, args: dict) -> tuple[str, dict]:
 # Shell bookkeeping: these commands change nothing a claim could be about.
 _NEUTRAL_WORDS = frozenset({"cd", "pushd", "popd", "export", "unset", "set", "alias", "true", "false", ":", "sleep",
                             "wait", "shopt", "trap", "umask"})
-_MOVES = frozenset({"cd", "pushd", "popd"})
-
-
-def _moved(where: str, word: str, to: str) -> str:
-    """The directory the next commands run in after ``cd``/``pushd``/``popd`` (relative to the line's
-    own start; '' once it is unknown or back where it began)."""
-    to = to.strip().strip("'\"")
-    if word == "popd" or not to or to == "-":
-        return ""
-    return to if to.startswith(("/", "~")) or not where else f"{where}/{to}"
 
 
 def _shell_steps(command: str) -> tuple[tuple[str, bool, str], ...]:
     """A command line's effects in order, each with whether the line's exit status 0 shows it
-    succeeded and the command it ran, as written and where an earlier ``cd`` took it. A coding
-    agent's run is that agent's report, not our own check."""
-    from agent.command_effects import executed_commands, is_agent_run, step_outcomes  # it imports this module
+    succeeded and what it ran (as written, behind what runs its nested shell, and where a ``cd``
+    moved it). A coding agent's run is that agent's report, not our own check."""
+    from agent.command_effects import is_agent_run, step_runs  # command_effects imports this module
 
-    steps, where = [], ""
-    for (step, shown), (written, _shown) in zip(step_outcomes(command), executed_commands(command)):
-        word, rest = (step.split(None, 1) + [""])[:2]
-        if word in _NEUTRAL_WORDS:
-            where = _moved(where, word, rest) if word in _MOVES else where
+    steps = []
+    for step, shown, ran in step_runs(command):
+        if step.split(None, 1)[0] in _NEUTRAL_WORDS:
             continue
-        ran = f"{written} (in {where})" if where else written
         steps.append(("delegate_report" if is_agent_run(step) else command_kind(step), shown, ran))
     return tuple(steps)
 
@@ -272,6 +262,15 @@ def _kinds(name: str, args: dict, data: dict, command: str) -> tuple[str, frozen
     return kind, frozenset({kind}), ((kind, True, command),)
 
 
+def _output(name: str, args: dict, data: dict, raw: str) -> str:
+    """What a call printed: for a shell run or a poll/wait/log on a background job, its output fields
+    only (the job's ``command`` beside them is not what it printed); any other call's whole result."""
+    ran = name == "terminal" or (name == "process_manage" and args.get("action") in _PROCESS_REPORT_ACTIONS)
+    if not ran or not data:
+        return raw
+    return "\n".join(data[key] for key in ("output", "output_preview") if isinstance(data.get(key), str))
+
+
 def _classify(call_id: str, name: str, args: dict, raw: str, index: int) -> EvidenceItem:
     data = _as_dict(raw)
     command = str(args.get("command") or data.get("command") or "")
@@ -290,7 +289,7 @@ def _classify(call_id: str, name: str, args: dict, raw: str, index: int) -> Evid
     return EvidenceItem(
         evidence_id=f"e_{call_id}", tool_name=name, kind=kind, status=status, target=str(target),
         provenance="subagent" if kind == "delegate_report" else "self", index=index, kinds=kinds, text=raw,
-        steps=steps,
+        steps=steps, output=_output(name, args, data, raw),
     )
 
 
@@ -311,12 +310,15 @@ _NOTICE_STATUS = re.compile(r"^Status: (?P<status>\w+)", re.MULTILINE)
 
 
 def _job_notice(match: re.Match, text: str, index: int) -> EvidenceItem:
-    command = match["cmd"].strip()
+    # the job's command runs to the "Output:" line (it may take several lines); what it printed follows
+    command, found, printed = text[match.start("cmd"):].partition("\nOutput:\n")
+    command = command.strip() if found else match["cmd"].strip()
     steps = _shell_steps(command) or (("exec", True, command),)
     return EvidenceItem(
         evidence_id=f"e_notice_{match['sid']}_{index}", tool_name="process_notice", kind=command_kind(command),
         status={0: "ok", 124: "timeout"}.get(int(match["exit"]), "error"), target=command, provenance="self",
         index=index, kinds=frozenset(kind for kind, _shown, _ran in steps), text=text, steps=steps,
+        output=printed[:-1] if printed.endswith("]") else printed,
     )
 
 
@@ -328,7 +330,7 @@ def _delegation_notice(match: re.Match, text: str, index: int) -> EvidenceItem:
         evidence_id=f"e_delegation_{match['sid']}_{index}", tool_name="delegation_notice", kind="delegate_report",
         status=states.pop() if len(states) == 1 else "partial", target=target,
         provenance="subagent", index=index, kinds=frozenset({"delegate_report"}), text=text,
-        steps=(("delegate_report", True, target),),
+        steps=(("delegate_report", True, target),), output=text,
     )
 
 
@@ -419,9 +421,9 @@ class _Effect:
     step: int
     kind: str
     shown: bool  # the result's status shows this step succeeded
-    # What the step speaks for, lower-cased: the command it ran (where it ran included), and the call's
-    # output when the call was this one step; in a line of several the output is theirs together, and
-    # another step's words are never its own.
+    # What the step speaks for, lower-cased: the command it ran (where it ran included), and what the
+    # call printed when the call was this one step; in a line of several the output is theirs together,
+    # and another step's words, or a job's command beside its output, are never its own.
     about: str = ""
 
     @property
@@ -434,7 +436,7 @@ def _effects(items: Sequence[EvidenceItem]) -> list[_Effect]:
     for item in items:
         steps = item.steps or ((item.kind, True, item.target),)
         for i, (kind, shown, ran) in enumerate(steps):
-            about = f"{ran or item.target}\n{item.text}" if len(steps) == 1 else ran
+            about = f"{ran or item.target}\n{item.output}" if len(steps) == 1 else ran
             effects.append(_Effect(item, i, kind, shown, about.lower()))
     return effects
 

@@ -109,18 +109,26 @@ def one_command(command: str) -> bool:
     return pieces <= 1
 
 
-def _peeled(step: str) -> tuple[str, bool]:
+# Reserved words a pipeline may follow (`if ! x`, `then ! x`, `do ! x`, `function f { ! x`); read with
+# the wrappers only where a `!` is looked for, since what a step runs is still read from its first word.
+_OPENER = re.compile(r"^(?:if|elif|then|else|while|until|do|function\s+[^\s(){};]+)(?:\s+|$)")
+
+
+def _peeled(step: str, openers: bool = False) -> tuple[str, bool]:
     """The command the wrappers in front of a simple command run, and whether a ``!`` among them turns
-    its status around: ``time ! pytest`` exits 0 when the tests fail, as ``! pytest`` does."""
+    its status around: ``time ! pytest`` exits 0 when the tests fail, as ``! pytest`` does. With
+    ``openers``, reserved words are peeled in the same pass as wrappers (``{ if ! pytest``, ``{ time
+    if ! pytest``), and a step with more layers than are read counts as turned around: it shows nothing."""
     negated = False
     for _ in range(16):
-        wrapper = _WRAPPER.match(step)
+        wrapper = (_OPENER.match(step) if openers else None) or _WRAPPER.match(step)
         negated = negated or (wrapper is not None and wrapper.group().strip() == "!")
         peeled = (step[wrapper.end():] if wrapper else step).lstrip("'\" \t")
         if peeled == step:
-            break
+            return step, negated
         step = peeled
-    return step, negated
+    left = (_OPENER.match(step) if openers else None) or _WRAPPER.match(step)
+    return step, negated or (openers and left is not None)
 
 
 def _peel(step: str) -> str:
@@ -317,7 +325,6 @@ _LIST_OPS = frozenset({";", "\n", "&"})
 _OPAQUE_OPS = frozenset({"(", ")", "$(", "`"})
 _ERREXIT = re.compile(r"^set\s+(?:-\w*e\w*|-o\s+errexit)\b")
 _PIPEFAIL = re.compile(r"^set\s+(?:-\w+\s+)*-o\s+pipefail\b|^set\s+-\w*o\w*\s+pipefail\b")
-_OPENERS = re.compile(r"^(?:(?:if|elif|then|else|while|until|do)\s+)+")  # reserved words a pipeline may follow
 
 
 def _and_or_confirmed(pipelines: list[list[int]], ops: list[str], pipefail: bool,
@@ -355,19 +362,39 @@ def _confirmed(parts: list[tuple[str, str]]) -> set[int]:
         elif op in _LIST_OPS:
             lists.append(([[]], []))
     lists = [(pipelines, ops) for pipelines, ops in lists if all(pipelines)]
-    # read the same way the wrappers are peeled, so a `!` behind `time`, `{` or `then` is not lost
-    negated = frozenset(position for position, step, _op in steps if _peeled(_OPENERS.sub("", step))[1])
+    # read in the same pass that peels wrappers and reserved words, so a `!` behind `time`, `{`, `then`
+    # or any mix of them is not lost
+    negated = frozenset(position for position, step, _op in steps if _peeled(step, openers=True)[1])
     shown: set[int] = set()
     for pipelines, ops in (lists if errexit else lists[-1:]):  # under set -e a failing list ends the run
         shown |= _and_or_confirmed(pipelines, ops, pipefail, negated)
     return shown
 
 
-def _outcomes(command: str, shown_by_caller: bool, depth: int, peel: bool = True) -> list[tuple[str, bool]]:
+_MOVES = frozenset({"cd", "pushd", "popd"})
+
+
+def _moved(where: str, step: str) -> str:
+    """The directory the next commands of this shell run in after ``step`` (relative to where the line
+    began; '' once it is unknown or back where it began)."""
+    word, to = (step.split(None, 1) + [""])[:2]
+    if word not in _MOVES:
+        return where
+    to = to.strip().strip("'\"")
+    if word == "popd" or not to or to == "-":
+        return ""
+    return to if to.startswith(("/", "~")) or not where else f"{where}/{to}"
+
+
+def _outcomes(command: str, shown_by_caller: bool, depth: int, around: str = "",
+              where: str = "") -> tuple[list[tuple[str, str, bool, str]], str]:
+    """Each simple command as (the command it runs, as written, shown, what it ran): as written, behind
+    what runs the nested shell it is in, and where a ``cd`` of its own shell or an outer one moved it;
+    and the directory the line leaves its shell in."""
     parts = _scan(command)
     opaque = any(op in _OPAQUE_OPS for _step, op in parts) or "<<" in command
     shown = set() if opaque or not shown_by_caller else _confirmed(parts)
-    out: list[tuple[str, bool]] = []
+    out: list[tuple[str, str, bool, str]] = []
     for position, (written, _op) in enumerate(parts):
         step = _peel(written)
         if not step:
@@ -375,10 +402,17 @@ def _outcomes(command: str, shown_by_caller: bool, depth: int, peel: bool = True
         nested = _SHELL_C.search(step) or _EVAL.search(step)
         if nested and depth < _MAX_DEPTH:
             body, _rest = _unquote(nested["body"])
-            out.extend(_outcomes(body, position in shown, depth + 1, peel))
+            # `STAGE=billing bash -c './deploy.sh'` runs ./deploy.sh with STAGE=billing; a `cd` in a
+            # nested shell moves only its own commands, but eval runs its words in this shell
+            runs_it = written[:len(written) - len(step)]
+            inner, moved = _outcomes(body, position in shown, depth + 1, f"{around}{runs_it}", where)
+            out.extend(inner)
+            where = moved if nested.re is _EVAL else where
         else:
-            out.append((step if peel else written, position in shown))
-    return out
+            ran = f"{around}{written} (in {where})" if where else f"{around}{written}"
+            out.append((step, written, position in shown, ran))
+            where = _moved(where, step)
+    return out, where
 
 
 def step_outcomes(command: str) -> tuple[tuple[str, bool], ...]:
@@ -387,13 +421,21 @@ def step_outcomes(command: str) -> tuple[tuple[str, bool], ...]:
     ``set -o pipefail``), and only along the trailing ``&&`` chain of the final list (every list
     under ``set -e``): ``a || b`` shows neither, ``a; b`` shows only ``b``. A nested ``bash -c`` is
     followed inside; subshells, substitutions and here-documents show nothing."""
-    return tuple(_outcomes(command or "", True, 0))
+    return tuple((step, shown) for step, _written, shown, _ran in _outcomes(command or "", True, 0)[0])
+
+
+def step_runs(command: str) -> tuple[tuple[str, bool, str], ...]:
+    """``step_outcomes`` with what each command ran: as written, behind what runs the nested shell it
+    is in (``STAGE=billing bash -c './deploy.sh'`` ran ``STAGE=billing ./deploy.sh``), and where a
+    ``cd`` before it moved it. A ``cd`` inside ``bash -c`` moves only that shell's commands; one run by
+    ``eval`` moves this shell's."""
+    return tuple((step, shown, ran) for step, _written, shown, ran in _outcomes(command or "", True, 0)[0])
 
 
 def executed_commands(command: str) -> tuple[tuple[str, bool], ...]:
     """``step_outcomes`` with each simple command as written, its wrappers kept (``uv run pytest -q``,
     not ``pytest -q``): what a request to run one particular command is compared with."""
-    return tuple(_outcomes(command or "", True, 0, peel=False))
+    return tuple((written, shown) for _step, written, shown, _ran in _outcomes(command or "", True, 0)[0])
 
 
 def invokes(step: str, command: str) -> bool:

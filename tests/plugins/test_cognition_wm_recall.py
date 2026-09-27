@@ -6,6 +6,7 @@ Real agent loop, plugin discovery and terminal tool against a scripted provider,
 isolated HERMES_HOME. Commands are stand-in scripts.
 """
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -427,3 +428,29 @@ def test_a_test_command_only_printed_beside_a_lessons_run_is_no_result_to_credit
     assert [o.result for o in _store().outcomes(session_id="day2", actor_kind="self")
             if o.claim_class == "tests_pass"] == ["unknown"]
     assert _store().signal_summary(lesson.experience_id).verifications == 0
+
+
+def test_a_background_jobs_command_is_no_result_to_credit_a_lesson_with(tmp_path, monkeypatch):
+    """The lesson's command tested test_a.py in the background; test_b.py is only in the job's command,
+    beside what it printed, so "both pass" did not hold. Running both earns the credit."""
+    def wait_on_the_job(record) -> ToolCall:
+        started = next(json.loads(str(m.get("content"))) for m in reversed(record["body"]["messages"])
+                       if m.get("role") == "tool")
+        return ToolCall("tool_call", {"calls": [{"name": "process_manage", "arguments": {
+            "action": "wait", "session_id": started["session_id"], "timeout": 30}}]})
+
+    with Project(tmp_path, monkeypatch) as project:
+        project.teach_correction()
+        (lesson,) = _store().experiences()
+        uv = f"{project.bin}/uv run pytest"
+        project.script += [_task("跑測試 day2"),
+                           ToolCall("terminal", {"command": f"{uv} tests/test_a.py && : tests/test_b.py", "background": True}),
+                           wait_on_the_job, Text("test_a.py and test_b.py tests pass.")]
+        project.turn("day2", "跑一下測試")
+        named = _store().signal_summary(lesson.experience_id).verifications
+        project.script += [_task("跑測試 day3"),
+                           ToolCall("terminal", {"command": f"{uv} tests/test_a.py tests/test_b.py", "background": True}),
+                           wait_on_the_job, Text("test_a.py and test_b.py tests pass.")]
+        project.turn("day3", "跑一下測試")
+
+    assert (named, _store().signal_summary(lesson.experience_id).verifications) == (0, 1)

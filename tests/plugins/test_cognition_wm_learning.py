@@ -5,6 +5,7 @@ Real agent loop, real plugin discovery and the real terminal tool against a scri
 in the test's isolated HERMES_HOME. Commands are tiny stand-in scripts, so nothing real runs.
 """
 
+import json
 import os
 import re
 import stat
@@ -678,6 +679,7 @@ def test_a_file_only_printed_beside_a_test_run_is_not_tested_ours_or_a_reports(t
 @pytest.mark.parametrize("negated", [
     pytest.param("bash -c 'time ! {uv} run pytest -q'", id="behind-time"),
     pytest.param("set -e; if true; then ! {uv} run pytest -q; fi", id="behind-then-under-errexit"),
+    pytest.param("bash -c 'set -e; {{ if ! {uv} run pytest -q; then :; fi; }}'", id="behind-if-inside-braces"),
 ])
 def test_a_run_negated_behind_time_is_neither_our_pass_nor_a_check_of_a_report(tmp_path, monkeypatch, negated):
     """`time ! uv run pytest -q` exits 0 because the tests failed, as `! cmd` does, and so does a `!`
@@ -714,3 +716,72 @@ def test_an_escaped_semicolon_leaves_a_printed_test_command_printed(tmp_path, mo
     assert printed == (["unknown"], "reported")
     assert (_tests_pass_by_us(), _store().outcomes(actor_kind="external_agent")[0].result) == (["unknown", "success"],
                                                                                                "success")
+
+
+# ------------------------------------------------------------------ third review round, focused (2026-09-27)
+
+
+def _wait_on_the_job(record) -> ToolCall:
+    """Wait on the background job the last tool result started (process_manage is reached through tool_call)."""
+    started = next(json.loads(str(m.get("content"))) for m in reversed(record["body"]["messages"])
+                   if m.get("role") == "tool")
+    return ToolCall("tool_call", {"calls": [{"name": "process_manage", "arguments": {
+        "action": "wait", "session_id": started["session_id"], "timeout": 30}}]})
+
+
+def test_a_background_jobs_command_is_not_what_it_printed_ours_or_a_reports(tmp_path, monkeypatch):
+    """The wait on `pytest tests/test_a.py && : tests/test_b.py` carries that command beside what the job
+    printed; the no-op named test_b.py, nothing tested it. Running both does back the claim."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        chat.stand_in("claude", "test_a.py and test_b.py tests pass.")
+        script += [_terminal(chat.cmd("claude -p 'fix test_a.py and test_b.py'")), Text("Claude 回報兩個檔案的測試都通過。"),
+                   ToolCall("terminal", {"command": f"{chat.cmd('pytest')} tests/test_a.py && : tests/test_b.py",
+                                         "background": True}),
+                   _wait_on_the_job, Text("test_a.py and test_b.py tests pass.")]
+        chat.turn("s1", "請 claude 修 test_a.py 和 test_b.py")
+        chat.turn("s1", "在背景把兩個都跑一下")
+        named = (_tests_pass_by_us(), _store().outcomes(actor_kind="external_agent")[0].result)
+        script += [ToolCall("terminal", {"command": f"{chat.cmd('pytest')} tests/test_a.py tests/test_b.py",
+                                         "background": True}),
+                   _wait_on_the_job, Text("test_a.py and test_b.py tests pass.")]
+        chat.turn("s1", "兩個都真的跑")
+
+    assert named == (["unknown"], "reported")
+    assert (_tests_pass_by_us(), _store().outcomes(actor_kind="external_agent")[0].result) == (["unknown", "success"],
+                                                                                               "success")
+
+
+def test_a_nested_shell_runs_with_the_environment_it_was_given(tmp_path, monkeypatch):
+    """`STAGE=billing bash -c './deploy.sh'` deployed billing: ours and a coding agent's report on it hold."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        chat.stand_in("deploy.sh", "deployed")
+        chat.stand_in("claude", "I deployed billing to production.")
+        script += [_terminal(chat.cmd("claude -p 'deploy billing'")), Text("Claude 回報已部署 billing。"),
+                   _terminal(f"STAGE=billing bash -c '{chat.cmd('deploy.sh')}' && echo done"), Text("billing 已部署完成。")]
+        chat.turn("s1", "請 claude 部署 billing")
+        chat.turn("s1", "你自己也部署確認")
+
+    assert [o.result for o in _store().outcomes(actor_kind="self", claim_class="deployed")] == ["success"]
+    assert _store().outcomes(actor_kind="external_agent")[0].result == "success"
+
+
+@pytest.mark.parametrize("line", [
+    pytest.param("STAGE=billing bash -c 'true' && {deploy}", id="environment-of-a-nested-no-op"),
+    pytest.param("bash -c 'cd billing && true' && {deploy}", id="directory-of-a-nested-shell"),
+])
+def test_what_a_nested_shell_was_given_is_not_its_siblings(tmp_path, monkeypatch, line):
+    """The deploy ran beside the nested shell, not in it: billing's name or directory never reached it."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        chat.stand_in("deploy.sh", "deployed")
+        (chat.work / "billing").mkdir()
+        chat.stand_in("claude", "I deployed billing to production.")
+        script += [_terminal(chat.cmd("claude -p 'deploy billing'")), Text("Claude 回報已部署 billing。"),
+                   _terminal(line.format(deploy=chat.cmd("deploy.sh"))), Text("billing 已部署完成。")]
+        chat.turn("s1", "請 claude 部署 billing")
+        chat.turn("s1", "你自己也部署確認")
+
+    assert [o.result for o in _store().outcomes(actor_kind="self", claim_class="deployed")] == ["unknown"]
+    assert _store().outcomes(actor_kind="external_agent")[0].result == "reported"
