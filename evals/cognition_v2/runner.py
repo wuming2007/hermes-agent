@@ -306,7 +306,7 @@ def _run_case(case: dict, arm_name: str, repeat: int, work_root: Path, home: Pat
 
 
 def _compress(agent: Any, db: Any, session_id: str) -> None:
-    from tui_gateway.session_compression import _compress_session_history
+    from tui_gateway.server import _compress_session_history  # the facade binds what the sibling late-imports
 
     _compress_session_history({"agent": agent, "history": db.get_messages_as_conversation(session_id),
                                "history_lock": threading.Lock(), "history_version": 1, "session_key": session_id}, "")
@@ -328,13 +328,22 @@ def run(home: Path, cases_path: Path, out: Path, *, arms: list[str], repeats: in
                 discover_plugins(force=True)
                 for repeat in range(repeats):
                     for case in cases:
-                        for row in _run_case(case, arm_name, repeat, home / "eval-work", home):
-                            sink.write(json.dumps(row, ensure_ascii=False) + "\n")
+                        try:
+                            for row in _run_case(case, arm_name, repeat, home / "eval-work", home):
+                                sink.write(json.dumps(row, ensure_ascii=False) + "\n")
+                                sink.flush()
+                                if row["kind"] == "turn":
+                                    print(f"{row['arm']} r{repeat} {row['case']} s{row['session']} t{row['turn']}: "
+                                          f"{row['wall_s']}s calls={row['api_calls']} "
+                                          f"blocked={row['blocked_tool_calls']} "
+                                          f"checks={sum(c['ok'] for c in row['checks'])}/{len(row['checks'])}",
+                                          flush=True)
+                        except Exception as exc:  # one broken case is recorded; hours of other cases are kept
+                            error = {"kind": "error", "case": case["id"], "set": case.get("set", "dev"),
+                                     "arm": arm_name, "repeat": repeat, "error": f"{type(exc).__name__}: {exc}"}
+                            sink.write(json.dumps(error, ensure_ascii=False) + "\n")
                             sink.flush()
-                            if row["kind"] == "turn":
-                                print(f"{row['arm']} r{repeat} {row['case']} s{row['session']} t{row['turn']}: "
-                                      f"{row['wall_s']}s calls={row['api_calls']} blocked={row['blocked_tool_calls']} "
-                                      f"checks={sum(c['ok'] for c in row['checks'])}/{len(row['checks'])}")
+                            print(f"{arm_name} r{repeat} {case['id']}: ERROR {error['error']}", flush=True)
     finally:
         if original is not None:
             from hermes_cli.config import atomic_config_write
@@ -354,7 +363,9 @@ def summarize(path: Path) -> dict:
                 by_arm[row["arm"]][metric].append(row[metric])
     summary = {arm: {m: {"median": statistics.median(v), "min": min(v), "max": max(v), "n": len(v)}
                      for m, v in metrics.items()} for arm, metrics in by_arm.items()}
-    for arm in summary:
+    for arm in {row["arm"] for row in rows}:
+        summary.setdefault(arm, {})
+        summary[arm]["errors"] = sum(row.get("kind") == "error" and row["arm"] == arm for row in rows)
         mine = [row for row in turns if row["arm"] == arm]
         checks = [c["ok"] for row in mine for c in row.get("checks") or []]
         summary[arm]["checks"] = {"held": sum(checks), "total": len(checks)}

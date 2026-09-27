@@ -244,3 +244,40 @@ def test_the_run_uses_the_eval_homes_own_model_and_provider(tmp_path, monkeypatc
 
     (row,) = [r for r in rows if r["kind"] == "turn"]
     assert (row["model"], row["provider"]) == ("fake-model", "custom")
+
+
+def test_a_case_that_compacts_mid_conversation_runs_through(tmp_path, monkeypatch):
+    case = {"id": "compacts", "set": "dev", "sessions": [{"compact_before_turn": 2, "turns": ["一", "二", "三"]}]}
+    rows = _run_scripted(tmp_path, monkeypatch, case, lambda _r: Text("好。"), ["on"])
+
+    assert [r["turn"] for r in rows if r["kind"] == "turn"] == [0, 1, 2]
+
+
+def test_one_broken_case_is_recorded_and_the_run_goes_on(tmp_path, monkeypatch):
+    from evals.cognition_v2 import runner
+
+    real = runner._write_files
+
+    def broken(work, files):
+        if files and "boom.txt" in files:
+            raise OSError("disk full")
+        return real(work, files)
+
+    monkeypatch.setattr(runner, "_write_files", broken)
+    home = tmp_path / "eval-home"
+    runner.init_home(home)
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text("".join(json.dumps(c) + "\n" for c in (
+        {"id": "broken", "set": "dev", "files": {"boom.txt": "x"}, "turns": ["hi"]},
+        {"id": "fine", "set": "dev", "turns": ["hi"]})), encoding="utf-8")
+    out = tmp_path / "rows.jsonl"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    with FakeLLMServer([], default_text="好。") as server:
+        write_hermes_home(home, server.base_url, extra_config=_NO_BORROWED_LOGINS)
+        runner.run(home, cases, out, arms=["on"], repeats=1, case_set="dev")
+
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert [(r["kind"], r["case"]) for r in rows] == [("error", "broken"), ("turn", "fine"), ("case", "fine")]
+    assert "disk full" in rows[0]["error"]
+    assert runner.summarize(out)["on"]["errors"] == 1
