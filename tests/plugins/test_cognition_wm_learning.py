@@ -639,3 +639,78 @@ def test_a_task_finished_again_by_another_model_is_that_models_own_record(tmp_pa
 
     assert {o.actor_id: o.result for o in _store().outcomes(claim_class="task")} == {"model-a": "unknown",
                                                                                    "model-b": "corrected"}
+
+
+# ------------------------------------------------------------------ third review round (2026-09-27)
+
+
+def _tests_pass_by_us() -> list[str]:
+    return [o.result for o in _store().outcomes(actor_kind="self", claim_class="tests_pass")]
+
+
+def _exit_status_shown(chat: Chat, session_id: str, output: str) -> str:
+    """The real shell's exit status of the run whose output has ``output`` in it, as the model saw it."""
+    rows = [str(m.get("content")) for m in chat.db.get_messages_as_conversation(session_id) if m.get("role") == "tool"]
+    return next(m.group(1) for row in rows if output in row for m in [re.search(r'"exit_code": (-?\d+)', row)] if m)
+
+
+def test_a_file_only_printed_beside_a_test_run_is_not_tested_ours_or_a_reports(tmp_path, monkeypatch):
+    """`pytest tests/test_a.py && echo test_b.py` tested A and printed B's name: neither our claim about
+    both nor a coding agent's report about both holds on it. Running each of them does."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        chat.stand_in("claude", "test_a.py and test_b.py tests pass.")
+        script += [_terminal(chat.cmd("claude -p 'fix test_a.py and test_b.py'")), Text("Claude 回報兩個檔案的測試都通過。"),
+                   _terminal(f"{chat.cmd('pytest')} tests/test_a.py && echo test_b.py"),
+                   Text("test_a.py and test_b.py tests pass.")]
+        chat.turn("s1", "請 claude 修 test_a.py 和 test_b.py")
+        chat.turn("s1", "兩個都跑一下")
+        printed = (_tests_pass_by_us(), _store().outcomes(actor_kind="external_agent")[0].result)
+        script += [_terminal(f"{chat.cmd('pytest')} tests/test_a.py && {chat.cmd('pytest')} tests/test_b.py"),
+                   Text("test_a.py and test_b.py tests pass.")]
+        chat.turn("s1", "兩個都真的跑")
+
+    assert printed == (["unknown"], "reported")
+    assert (_tests_pass_by_us(), _store().outcomes(actor_kind="external_agent")[0].result) == (["unknown", "success"],
+                                                                                               "success")
+
+
+@pytest.mark.parametrize("negated", [
+    pytest.param("bash -c 'time ! {uv} run pytest -q'", id="behind-time"),
+    pytest.param("set -e; if true; then ! {uv} run pytest -q; fi", id="behind-then-under-errexit"),
+])
+def test_a_run_negated_behind_time_is_neither_our_pass_nor_a_check_of_a_report(tmp_path, monkeypatch, negated):
+    """`time ! uv run pytest -q` exits 0 because the tests failed, as `! cmd` does, and so does a `!`
+    after `then` under `set -e`; `time` alone keeps the run's own status."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        chat.stand_in("uv", "1 failed", status=1)
+        script += [_terminal(chat.cmd("claude -p 'fix the flaky test'")), Text("Claude 回報測試都通過了。"),
+                   _terminal(negated.format(uv=chat.cmd("uv"))), Text("測試都通過了。")]
+        chat.turn("s1", "請 claude 修不穩的測試")
+        chat.turn("s1", "你自己確認一下")
+        negated = (_exit_status_shown(chat, "s1", "1 failed"), _tests_pass_by_us(),
+                   _store().outcomes(actor_kind="external_agent")[0].result)
+        script += [_terminal(f"bash -c 'time {chat.cmd('pytest')} -q'"), Text("測試都通過了。")]
+        chat.turn("s1", "再確認一次")
+
+    assert negated == ("0", ["unknown"], "reported")
+    assert (_tests_pass_by_us(), _store().outcomes(actor_kind="external_agent")[0].result) == (["unknown", "success"],
+                                                                                               "success")
+
+
+def test_an_escaped_semicolon_leaves_a_printed_test_command_printed(tmp_path, monkeypatch):
+    """`echo pytest \\;` prints "pytest ;": the semicolon is an argument, not a second command."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        script += [_terminal(chat.cmd("claude -p 'fix the flaky test'")), Text("Claude 回報測試都通過了。"),
+                   _terminal("echo pytest \\;"), Text("測試都通過了。")]
+        chat.turn("s1", "請 claude 修不穩的測試")
+        chat.turn("s1", "你自己確認一下")
+        printed = (_tests_pass_by_us(), _store().outcomes(actor_kind="external_agent")[0].result)
+        script += [_terminal(f"echo start; {chat.cmd('pytest')} -q"), Text("測試都通過了。")]
+        chat.turn("s1", "真的跑一次")
+
+    assert printed == (["unknown"], "reported")
+    assert (_tests_pass_by_us(), _store().outcomes(actor_kind="external_agent")[0].result) == (["unknown", "success"],
+                                                                                               "success")

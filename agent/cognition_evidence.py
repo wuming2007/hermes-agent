@@ -43,8 +43,9 @@ class EvidenceItem:
     index: int  # message index of the result row
     kinds: frozenset = frozenset()  # every kind the call covered: `pytest && ./deploy.sh` is test and deploy
     text: str = field(default="", repr=False, compare=False)  # the result as the model saw it
-    # What the call did, in order: (kind, whether its status shows that step succeeded). A shell
-    # line is one step per command; `pytest || true` ran the tests but its exit 0 shows nothing.
+    # What the call did, in order: (kind, whether its status shows that step succeeded, the command the
+    # step ran). A shell line is one step per command; `pytest || true` ran the tests but its exit 0
+    # shows nothing.
     steps: tuple = ()
 
 
@@ -117,7 +118,6 @@ _LEADING_CD = re.compile(r"^\s*(?:cd\s+\S+\s*&&\s*)*")
 _QUOTED_TEXT = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 _SHOWS_ONLY = re.compile(r"^(?:\S*/)?(?:echo|printf|cat|grep|egrep|fgrep|rg|ag|ack|head|tail|less|more|wc|which|type"
                          r"|whereis|man|file|stat)\b")
-_SEPARATED = re.compile(r"&&|\|\||[;|&\n]")
 _RUNS = frozenset({"test", "deploy"})
 _PROCESS_REPORT_ACTIONS = frozenset({"poll", "wait", "log"})
 _PROCESS_ACTION_KINDS = {"list": "read"}
@@ -126,10 +126,13 @@ _PROCESS_ACTION_KINDS = {"list": "read"}
 def command_kind(command: str) -> str:
     """What a shell command does, by its first matching step kind (exec when nothing matches). A test
     or a deploy counts only when it is what runs: not quoted text, and not the words handed to a
-    command that only prints or searches."""
+    command that only prints or searches. Whether a line is that one command is read by the shell
+    scanner that reads its exit status, so ``echo pytest \\;`` only prints."""
+    from agent.command_effects import one_command  # command_effects imports this module
+
     command = _LEADING_CD.sub("", command or "")
     bare = _QUOTED_TEXT.sub("''", command)
-    shows = bool(_SHOWS_ONLY.match(command)) and not _SEPARATED.search(bare)
+    shows = bool(_SHOWS_ONLY.match(command)) and one_command(command)
     for kind, pattern in _COMMAND_KINDS:
         if kind in _RUNS and (shows or not pattern.search(bare)):
             continue
@@ -221,18 +224,32 @@ def _unwrap(name: str, args: dict) -> tuple[str, dict]:
 # Shell bookkeeping: these commands change nothing a claim could be about.
 _NEUTRAL_WORDS = frozenset({"cd", "pushd", "popd", "export", "unset", "set", "alias", "true", "false", ":", "sleep",
                             "wait", "shopt", "trap", "umask"})
+_MOVES = frozenset({"cd", "pushd", "popd"})
 
 
-def _shell_steps(command: str) -> tuple[tuple[str, bool], ...]:
+def _moved(where: str, word: str, to: str) -> str:
+    """The directory the next commands run in after ``cd``/``pushd``/``popd`` (relative to the line's
+    own start; '' once it is unknown or back where it began)."""
+    to = to.strip().strip("'\"")
+    if word == "popd" or not to or to == "-":
+        return ""
+    return to if to.startswith(("/", "~")) or not where else f"{where}/{to}"
+
+
+def _shell_steps(command: str) -> tuple[tuple[str, bool, str], ...]:
     """A command line's effects in order, each with whether the line's exit status 0 shows it
-    succeeded. A coding agent's run is that agent's report, not our own check."""
-    from agent.command_effects import is_agent_run, step_outcomes  # command_effects imports this module
+    succeeded and the command it ran, as written and where an earlier ``cd`` took it. A coding
+    agent's run is that agent's report, not our own check."""
+    from agent.command_effects import executed_commands, is_agent_run, step_outcomes  # it imports this module
 
-    steps = []
-    for step, shown in step_outcomes(command):
-        if step.split(None, 1)[0] in _NEUTRAL_WORDS:
+    steps, where = [], ""
+    for (step, shown), (written, _shown) in zip(step_outcomes(command), executed_commands(command)):
+        word, rest = (step.split(None, 1) + [""])[:2]
+        if word in _NEUTRAL_WORDS:
+            where = _moved(where, word, rest) if word in _MOVES else where
             continue
-        steps.append(("delegate_report" if is_agent_run(step) else command_kind(step), shown))
+        ran = f"{written} (in {where})" if where else written
+        steps.append(("delegate_report" if is_agent_run(step) else command_kind(step), shown, ran))
     return tuple(steps)
 
 
@@ -241,17 +258,18 @@ def _kinds(name: str, args: dict, data: dict, command: str) -> tuple[str, frozen
     poll/wait/log speaks for its job's command; kill/write/submit only act on the job."""
     report = name == "process_manage" and args.get("action") in _PROCESS_REPORT_ACTIONS
     if name == "terminal" and (args.get("background") or data.get("output") == "Background process started"):
-        steps = (("background_spawn", False), *((kind, False) for kind, _shown in _shell_steps(command)))
-        return "background_spawn", frozenset(kind for kind, _shown in steps), steps
+        steps = (("background_spawn", False, command),
+                 *((kind, False, ran) for kind, _shown, ran in _shell_steps(command)))
+        return "background_spawn", frozenset(kind for kind, _shown, _ran in steps), steps
     if name == "process_manage" and not report:
         kind = _PROCESS_ACTION_KINDS.get(str(args.get("action")), "exec")
     elif command and (name == "terminal" or report):
-        steps = _shell_steps(command) or (("exec", True),)
-        kinds = frozenset(kind for kind, _shown in steps)
+        steps = _shell_steps(command) or (("exec", True, command),)
+        kinds = frozenset(kind for kind, _shown, _ran in steps)
         return ("delegate_report" if kinds == {"delegate_report"} else command_kind(command)), kinds, steps
     else:
         kind = _TOOL_KINDS.get(name, "exec")
-    return kind, frozenset({kind}), ((kind, True),)
+    return kind, frozenset({kind}), ((kind, True, command),)
 
 
 def _classify(call_id: str, name: str, args: dict, raw: str, index: int) -> EvidenceItem:
@@ -266,7 +284,9 @@ def _classify(call_id: str, name: str, args: dict, raw: str, index: int) -> Evid
     target = (args.get("path") or command or args.get("goal") or args.get("url")
               or (urls[0] if isinstance(urls, list) and urls else "") or args.get("query") or "")
     if args.get("workdir"):
-        target = f"{target} (in {args['workdir']})"
+        where = f" (in {args['workdir']})"  # every step ran there
+        target = f"{target}{where}"
+        steps = tuple((step_kind, shown, f"{ran}{where}") for step_kind, shown, ran in steps)
     return EvidenceItem(
         evidence_id=f"e_{call_id}", tool_name=name, kind=kind, status=status, target=str(target),
         provenance="subagent" if kind == "delegate_report" else "self", index=index, kinds=kinds, text=raw,
@@ -292,22 +312,23 @@ _NOTICE_STATUS = re.compile(r"^Status: (?P<status>\w+)", re.MULTILINE)
 
 def _job_notice(match: re.Match, text: str, index: int) -> EvidenceItem:
     command = match["cmd"].strip()
-    steps = _shell_steps(command) or (("exec", True),)
+    steps = _shell_steps(command) or (("exec", True, command),)
     return EvidenceItem(
         evidence_id=f"e_notice_{match['sid']}_{index}", tool_name="process_notice", kind=command_kind(command),
         status={0: "ok", 124: "timeout"}.get(int(match["exit"]), "error"), target=command, provenance="self",
-        index=index, kinds=frozenset(kind for kind, _shown in steps), text=text, steps=steps,
+        index=index, kinds=frozenset(kind for kind, _shown, _ran in steps), text=text, steps=steps,
     )
 
 
 def _delegation_notice(match: re.Match, text: str, index: int) -> EvidenceItem:
     states = {_SUBAGENT_STATUSES.get(m["status"], "error") for m in _NOTICE_STATUS.finditer(text)} or {"error"}
     goal = _NOTICE_GOAL.search(text)
+    target = goal["goal"].strip() if goal else ""
     return EvidenceItem(
         evidence_id=f"e_delegation_{match['sid']}_{index}", tool_name="delegation_notice", kind="delegate_report",
-        status=states.pop() if len(states) == 1 else "partial", target=goal["goal"].strip() if goal else "",
+        status=states.pop() if len(states) == 1 else "partial", target=target,
         provenance="subagent", index=index, kinds=frozenset({"delegate_report"}), text=text,
-        steps=(("delegate_report", True),),
+        steps=(("delegate_report", True, target),),
     )
 
 
@@ -398,6 +419,10 @@ class _Effect:
     step: int
     kind: str
     shown: bool  # the result's status shows this step succeeded
+    # What the step speaks for, lower-cased: the command it ran (where it ran included), and the call's
+    # output when the call was this one step; in a line of several the output is theirs together, and
+    # another step's words are never its own.
+    about: str = ""
 
     @property
     def position(self) -> tuple[int, int]:
@@ -405,8 +430,13 @@ class _Effect:
 
 
 def _effects(items: Sequence[EvidenceItem]) -> list[_Effect]:
-    return [_Effect(item, i, kind, shown) for item in items
-            for i, (kind, shown) in enumerate(item.steps or ((item.kind, True),))]
+    effects = []
+    for item in items:
+        steps = item.steps or ((item.kind, True, item.target),)
+        for i, (kind, shown, ran) in enumerate(steps):
+            about = f"{ran or item.target}\n{item.text}" if len(steps) == 1 else ran
+            effects.append(_Effect(item, i, kind, shown, about.lower()))
+    return effects
 
 
 def _may_have_run(effect: _Effect) -> bool:
@@ -443,10 +473,10 @@ def _claim_targets(sentence: str) -> frozenset:
     return frozenset(word for word in words if len(word) >= 3 and word not in _GENERIC_WORDS)
 
 
-def _mentions(item: EvidenceItem, targets: frozenset) -> bool:
-    """Whether a result's call or output names one of the claim's targets."""
-    haystack = f"{item.target}\n{item.text}".lower()
-    return any(target in haystack for target in targets)
+def _mentions(effect: _Effect, targets: frozenset) -> bool:
+    """Whether a step names one of the claim's targets: by the command it ran, and by the call's output
+    when it was the call's only step (``pytest a.py && echo b.py`` tested a.py, not b.py)."""
+    return any(target in effect.about for target in targets)
 
 
 def _listed(targets: frozenset) -> list[str]:
@@ -459,7 +489,7 @@ def _each_shown(listed: list[str], about: list[_Effect], support: _Support) -> _
     """A claim naming several things holds only when a result of its own kind shows each of them."""
     ids = []
     for target in listed:
-        mine = [e for e in about if _mentions(e.item, frozenset({target}))]
+        mine = [e for e in about if _mentions(e, frozenset({target}))]
         if not mine:
             return False, "target_not_shown", ()
         landed = [e for e in mine if e.item.status == "ok" and e.shown]
@@ -484,7 +514,7 @@ def _subagent_verdict(claim: StateClaim, reports: list[_Effect]) -> _Verdict:
 
 def _check_universal(claim: StateClaim, effects: list[_Effect], targets: frozenset) -> _Verdict:
     actions = [e for e in effects if e.kind in _ACTION_KINDS]
-    about = [e for e in actions if not targets or _mentions(e.item, targets)]
+    about = [e for e in actions if not targets or _mentions(e, targets)]
     if actions and not about:
         return False, "target_not_shown", ()
     latest: dict[tuple[str, str], EvidenceItem] = {}
@@ -511,7 +541,7 @@ def _record_verdict(claim: StateClaim, effects: list[_Effect], targets: frozense
     """A claim that only an earlier session's record backs: fine when the answer cites the record
     ("根據上次的紀錄", "as of"), otherwise not the current state."""
     records = [e for e in effects if e.kind == "historical" and e.item.status == "ok"
-               and (not targets or _mentions(e.item, targets))]
+               and (not targets or _mentions(e, targets))]
     if not records:
         return None
     ids = tuple(dict.fromkeys(e.item.evidence_id for e in records))
@@ -529,7 +559,7 @@ def _check(claim: StateClaim, items: Sequence[EvidenceItem]) -> _Verdict:
         and (not support.after_last_write or last_write is None or e.position > last_write)
     ]
     if relevant:
-        about = [e for e in relevant if not targets or _mentions(e.item, targets)]
+        about = [e for e in relevant if not targets or _mentions(e, targets)]
         if not about:
             return False, "target_not_shown", ()
         listed = _listed(targets)

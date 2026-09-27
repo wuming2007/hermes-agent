@@ -47,6 +47,44 @@ COMMIT_NAMING_A_RUNNER = ("terminal", {"command": "git commit -m 'make pytest pa
                           {"output": "[main 1a2b3c4] make pytest pass", "exit_code": 0, "error": None})
 SEARCH_FOR_A_RUNNER = ("terminal", {"command": "grep -rn pytest tests/"},
                        {"output": "tests/test_x.py:1:import pytest", "exit_code": 0, "error": None})
+TEST_A_ECHO_B = ("terminal", {"command": "pytest tests/test_a.py && echo test_b.py"},
+                 {"output": "3 passed\ntest_b.py", "exit_code": 0, "error": None})
+TEST_A_THEN_B = ("terminal", {"command": "pytest tests/test_a.py && pytest tests/test_b.py"},
+                 {"output": "3 passed\n3 passed", "exit_code": 0, "error": None})
+TEST_A_FAILED_THEN_B = ("terminal", {"command": "pytest tests/test_a.py; pytest tests/test_b.py"},
+                        {"output": "1 failed\n3 passed", "exit_code": 0, "error": None})
+VERBOSE_TEST_IN_DIR = ("terminal", {"command": "cd app && pytest -v"},
+                       {"output": "tests/test_a.py::test_x PASSED\ntests/test_b.py::test_y PASSED", "exit_code": 0,
+                        "error": None})
+TIMED_NEGATED_TEST = ("terminal", {"command": "time ! uv run pytest -q"},
+                      {"output": "1 failed", "exit_code": 0, "error": None})
+NESTED_TIMED_NEGATED_TEST = ("terminal", {"command": "bash -c 'time ! uv run pytest -q'"},
+                             {"output": "1 failed", "exit_code": 0, "error": None})
+TIMED_TEST = ("terminal", {"command": "time uv run pytest -q"}, {"output": "5 passed", "exit_code": 0, "error": None})
+ECHO_ESCAPED_SEMICOLON = ("terminal", {"command": "echo pytest \\;"}, {"output": "pytest ;", "exit_code": 0, "error": None})
+ECHO_THEN_TEST = ("terminal", {"command": "echo start; pytest -q"},
+                  {"output": "start\n5 passed", "exit_code": 0, "error": None})
+TEST_B_FAILED_THEN_A = ("terminal", {"command": "pytest tests/test_b.py; pytest tests/test_a.py"},
+                        {"output": "tests/test_b.py::test_y FAILED\n1 failed\ntests/test_a.py::test_x PASSED\n1 passed",
+                         "exit_code": 0, "error": None})
+TEST_A_BESIDE_A_NO_OP = ("terminal", {"command": "pytest tests/test_a.py && : tests/test_b.py"},
+                         {"output": "3 passed", "exit_code": 0, "error": None})
+CD_THEN_TWO_STEPS = ("terminal", {"command": "cd services/billing && npm ci && npm test"},
+                     {"output": "added 3 packages\n12 passing", "exit_code": 0, "error": None})
+TWO_STEPS_IN_WORKDIR = ("terminal", {"command": "source .venv/bin/activate && pytest -q", "workdir": "/srv/beta"},
+                        {"output": "5 passed", "exit_code": 0, "error": None})
+WRAPPED_DEPLOY_THEN_ECHO = ("terminal", {"command": "STAGE=billing ./deploy.sh && echo done"},
+                            {"output": "done", "exit_code": 0, "error": None})
+CAPITALIZED_FILE = ("terminal", {"command": "pytest tests/test_Parser.py"}, {"output": "2 passed", "exit_code": 0, "error": None})
+NEGATED_AFTER_CD = ("terminal", {"command": "cd app && time ! uv run pytest -q"},
+                    {"output": "1 failed", "exit_code": 0, "error": None})
+NEGATED_AFTER_THEN = ("terminal", {"command": "set -e; if true; then ! uv run pytest -q; fi"},
+                      {"output": "1 failed", "exit_code": 0, "error": None})
+NEGATED_IF_CONDITION = ("terminal", {"command": "set -e; if ! uv run pytest -q; then echo failed; fi"},
+                        {"output": "1 failed\nfailed", "exit_code": 0, "error": None})
+SEARCH_OVER_A_SUBSTITUTION = ("terminal", {"command": "grep -rn pytest $(git ls-files)"},
+                              {"output": "tests/test_x.py:1:import pytest", "exit_code": 0, "error": None})
+ECHO_WITH_TRAILING_SEMICOLON = ("terminal", {"command": "echo pytest;"}, {"output": "pytest", "exit_code": 0, "error": None})
 RUN_OK = ("terminal", {"command": "python app.py --check"}, {"output": "ok", "exit_code": 0, "error": None})
 DEPLOY_OK = ("terminal", {"command": "launchctl kickstart -k gui/501/com.example.app"},
              {"output": "", "exit_code": 0, "error": None})
@@ -124,6 +162,10 @@ WEB_PARTIAL = ("web_extract", {"urls": ["https://example.com/a", "https://exampl
                      "write", "ok", "self", id="argument-named-like-deploy"),
         pytest.param(("terminal", {"command": "cd app && bash scripts/deploy.sh prod"}, {"output": "", "exit_code": 0, "error": None}),
                      "deploy", "ok", "self", id="deploy-script"),
+        pytest.param(ECHO_ESCAPED_SEMICOLON, "read", "ok", "self", id="escaped-semicolon-is-an-argument"),
+        pytest.param(ECHO_THEN_TEST, "test", "ok", "self", id="print-then-test"),
+        pytest.param(SEARCH_OVER_A_SUBSTITUTION, "read", "ok", "self", id="search-over-a-substitution"),
+        pytest.param(ECHO_WITH_TRAILING_SEMICOLON, "read", "ok", "self", id="print-ending-in-a-semicolon"),
     ],
 )
 def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, kind, status, provenance):
@@ -226,6 +268,44 @@ def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, ki
                      id="commit-message-names-a-runner"),
         pytest.param([SEARCH_FOR_A_RUNNER], "測試都通過了。", [("tests_pass", "no_test_evidence")],
                      id="search-for-a-runner"),
+        # a step speaks for what it ran: another step's words, or output the line's steps share, are not its own
+        pytest.param([TEST_A_ECHO_B], "test_a.py and test_b.py tests pass.", [("tests_pass", "target_not_shown")],
+                     id="a-run-and-a-file-only-printed"),
+        pytest.param([TEST_A_ECHO_B], "test_b.py tests pass.", [("tests_pass", "target_not_shown")],
+                     id="the-file-only-printed"),
+        pytest.param([TEST_A_ECHO_B], "Finished test_b.py.", [("completed", "target_not_shown")],
+                     id="done-with-the-file-only-printed"),
+        pytest.param([TEST_A_ECHO_B], "test_a.py tests pass.", [], id="the-file-that-ran"),
+        pytest.param([TEST_A_THEN_B], "test_a.py and test_b.py tests pass.", [], id="each-file-its-own-run"),
+        pytest.param([TEST_A_FAILED_THEN_B], "test_a.py and test_b.py tests pass.", [("tests_pass", "result_not_shown")],
+                     id="first-file-before-a-semicolon"),
+        pytest.param([VERBOSE_TEST_IN_DIR], "test_a.py and test_b.py tests pass.", [], id="one-run-lists-both"),
+        # `time ! cmd` exits 0 when cmd fails, as `! cmd` does; `time cmd` keeps cmd's status
+        pytest.param([TIMED_NEGATED_TEST], "測試都通過了。", [("tests_pass", "result_not_shown")],
+                     id="negated-behind-time"),
+        pytest.param([NESTED_TIMED_NEGATED_TEST], "測試都通過了。", [("tests_pass", "result_not_shown")],
+                     id="negated-behind-time-in-bash-c"),
+        pytest.param([TIMED_TEST], "測試都通過了。", [], id="timed-test-run"),
+        # an escaped `\;` is an argument: the line only prints; a real separator still splits
+        pytest.param([ECHO_ESCAPED_SEMICOLON], "測試都通過了。", [("tests_pass", "no_test_evidence")],
+                     id="escaped-semicolon-printed"),
+        pytest.param([ECHO_THEN_TEST], "測試都通過了。", [], id="a-real-separator-still-splits"),
+        pytest.param([TEST_B_FAILED_THEN_A], "test_b.py tests pass.", [("tests_pass", "result_not_shown")],
+                     id="a-failed-run-named-in-output-the-steps-share"),
+        pytest.param([TEST_A_BESIDE_A_NO_OP], "test_a.py and test_b.py tests pass.", [("tests_pass", "target_not_shown")],
+                     id="a-file-named-by-a-step-that-does-nothing"),
+        # where a step ran and its own wrapper words are its own
+        pytest.param([CD_THEN_TWO_STEPS], "The billing tests pass.", [], id="the-directory-a-cd-moved-to"),
+        pytest.param([TWO_STEPS_IN_WORKDIR], "Beta 的測試通過了。", [], id="the-workdir-every-step-ran-in"),
+        pytest.param([WRAPPED_DEPLOY_THEN_ECHO], "billing 已部署完成。", [], id="a-steps-own-wrapper-words"),
+        pytest.param([CAPITALIZED_FILE], "test_Parser.py tests pass.", [], id="a-file-name-in-capitals"),
+        # a `!` behind `cd … &&`, or behind `then` or `if` under set -e, still turns the status around
+        pytest.param([NEGATED_AFTER_CD], "測試都通過了。", [("tests_pass", "result_not_shown")],
+                     id="negated-after-cd"),
+        pytest.param([NEGATED_AFTER_THEN], "測試都通過了。", [("tests_pass", "result_not_shown")],
+                     id="negated-after-then"),
+        pytest.param([NEGATED_IF_CONDITION], "測試都通過了。", [("tests_pass", "result_not_shown")],
+                     id="negated-if-condition"),
     ],
 )
 def test_claims_need_evidence_of_their_own_kind(steps, answer, unsupported):
@@ -267,6 +347,26 @@ def test_background_completion_notice_is_evidence_for_its_job(exit_code, unsuppo
 
     assert [(c.claim_class, c.reason) for c in report.unsupported] == unsupported
     assert (report.evidence[-1].kind, report.evidence[-1].target) == ("deploy", "./deploy.sh")
+
+
+def test_a_background_job_speaks_for_each_of_its_steps_alone():
+    """A job's completion notice, and a wait on it, are judged like a line run in the foreground:
+    the file only printed was not tested."""
+    line = "pytest tests/test_a.py && echo test_b.py"
+    spawn = ("terminal", {"command": line, "background": True},
+             {"output": "Background process started", "session_id": "proc_1", "pid": 42, "exit_code": 0, "error": None})
+    notice = {"role": "user", "content": (
+        f"[IMPORTANT: Background process proc_1 completed normally (exit code 0).\nCommand: {line}\n"
+        "Output:\n3 passed\ntest_b.py]")}
+    wait = ("process_manage", {"action": "wait", "session_id": "proc_1"},
+            {"status": "exited", "command": line, "exit_code": 0, "output": "3 passed\ntest_b.py"})
+    claim = "test_a.py and test_b.py tests pass."
+
+    by_notice = build_evidence_report(claim, _turn(spawn) + [{"role": "assistant", "content": "在背景跑。"}, notice])
+    by_wait = build_evidence_report(claim, _turn(spawn, wait))
+
+    assert [(c.claim_class, c.reason) for report in (by_notice, by_wait) for c in report.unsupported] == [
+        ("tests_pass", "target_not_shown"), ("tests_pass", "target_not_shown")]
 
 
 def test_runtime_nudges_do_not_start_a_new_turn():

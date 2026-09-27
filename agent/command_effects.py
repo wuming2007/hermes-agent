@@ -94,14 +94,38 @@ def _split(command: str) -> list[str]:
     return [step for step, _op in _scan(command) if step]
 
 
-def _peel(step: str) -> str:
-    """The command a wrapper runs: ``sudo env X=1 timeout 60 claude -p x`` runs ``claude -p x``."""
+_LIST_OR_PIPE = frozenset({";", "\n", "&", "&&", "||", "|", "|&"})
+
+
+def one_command(command: str) -> bool:
+    """Whether a command line runs one command, split where the shell splits lists and pipelines:
+    ``echo pytest \\;`` is one (its last argument is ``;``), as are ``echo pytest;`` and ``grep x
+    $(git ls-files)`` (the substitution is part of it); ``echo x; pytest`` is two."""
+    pieces, words = 0, False
+    for step, op in _scan(command or ""):
+        words = words or bool(step)
+        if op in _LIST_OR_PIPE or not op:
+            pieces, words = pieces + words, False
+    return pieces <= 1
+
+
+def _peeled(step: str) -> tuple[str, bool]:
+    """The command the wrappers in front of a simple command run, and whether a ``!`` among them turns
+    its status around: ``time ! pytest`` exits 0 when the tests fail, as ``! pytest`` does."""
+    negated = False
     for _ in range(16):
-        peeled = _WRAPPER.sub("", step, count=1).lstrip("'\" \t")
+        wrapper = _WRAPPER.match(step)
+        negated = negated or (wrapper is not None and wrapper.group().strip() == "!")
+        peeled = (step[wrapper.end():] if wrapper else step).lstrip("'\" \t")
         if peeled == step:
             break
         step = peeled
-    return step
+    return step, negated
+
+
+def _peel(step: str) -> str:
+    """The command a wrapper runs: ``sudo env X=1 timeout 60 claude -p x`` runs ``claude -p x``."""
+    return _peeled(step)[0]
 
 
 def _unquote(text: str) -> tuple[str, str]:
@@ -293,7 +317,7 @@ _LIST_OPS = frozenset({";", "\n", "&"})
 _OPAQUE_OPS = frozenset({"(", ")", "$(", "`"})
 _ERREXIT = re.compile(r"^set\s+(?:-\w*e\w*|-o\s+errexit)\b")
 _PIPEFAIL = re.compile(r"^set\s+(?:-\w+\s+)*-o\s+pipefail\b|^set\s+-\w*o\w*\s+pipefail\b")
-_NEGATED = re.compile(r"^!\s")  # `! cmd`: the pipeline's status turned around
+_OPENERS = re.compile(r"^(?:(?:if|elif|then|else|while|until|do)\s+)+")  # reserved words a pipeline may follow
 
 
 def _and_or_confirmed(pipelines: list[list[int]], ops: list[str], pipefail: bool,
@@ -301,7 +325,7 @@ def _and_or_confirmed(pipelines: list[list[int]], ops: list[str], pipefail: bool
     """Steps of one ``&&``/``||`` list whose success its status 0 shows. The list is left-associative:
     ``… && last`` shows ``last`` and whatever the part before shows; ``… || last`` shows nothing, since
     ``last`` ran only if the part before failed. A pipeline shows its last command (all under pipefail);
-    a negated one (``! cmd``) shows none, since its status 0 says ``cmd`` failed."""
+    a negated one (``! cmd``, ``time ! cmd``) shows none, since its status 0 says ``cmd`` failed."""
     shown: set[int] = set()
     i = len(pipelines) - 1
     while True:
@@ -331,7 +355,8 @@ def _confirmed(parts: list[tuple[str, str]]) -> set[int]:
         elif op in _LIST_OPS:
             lists.append(([[]], []))
     lists = [(pipelines, ops) for pipelines, ops in lists if all(pipelines)]
-    negated = frozenset(position for position, step, _op in steps if _NEGATED.match(step))
+    # read the same way the wrappers are peeled, so a `!` behind `time`, `{` or `then` is not lost
+    negated = frozenset(position for position, step, _op in steps if _peeled(_OPENERS.sub("", step))[1])
     shown: set[int] = set()
     for pipelines, ops in (lists if errexit else lists[-1:]):  # under set -e a failing list ends the run
         shown |= _and_or_confirmed(pipelines, ops, pipefail, negated)

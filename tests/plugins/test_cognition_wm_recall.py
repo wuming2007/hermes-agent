@@ -362,3 +362,68 @@ def test_a_lessons_command_only_printed_beside_another_run_is_not_following_it(t
         project.turn("day2", "跑一下測試")
 
     assert _store().signal_summary(lesson.experience_id).verifications == 0
+
+
+def test_a_lessons_run_negated_behind_time_is_not_following_it(tmp_path, monkeypatch):
+    """`time ! uv run pytest -q` exits 0 because the tests failed; `time uv run pytest -q` that passes is
+    following the lesson."""
+    with Project(tmp_path, monkeypatch) as project:
+        project.teach_correction()
+        (lesson,) = _store().experiences()
+        (project.bin / "uv").write_text("#!/bin/sh\necho '1 failed'\nexit 1\n", encoding="utf-8")
+        project.script += [_task("跑測試 day2"),
+                           ToolCall("terminal", {"command": f"bash -c 'time ! {project.bin}/uv run pytest -q'"}),
+                           Text("測試都通過了。")]
+        project.turn("day2", "跑一下測試")
+        negated = (_store().signal_summary(lesson.experience_id).verifications,
+                   [o.result for o in _store().outcomes(session_id="day2", actor_kind="self")
+                    if o.claim_class == "tests_pass"])
+        (project.bin / "uv").write_text("#!/bin/sh\necho '5 passed'\n", encoding="utf-8")
+        project.script += [_task("跑測試 day3"),
+                           ToolCall("terminal", {"command": f"bash -c 'time {project.bin}/uv run pytest -q'"}),
+                           Text("測試都通過了。")]
+        project.turn("day3", "跑一下測試")
+
+    assert negated == (0, ["unknown"])
+    assert _store().signal_summary(lesson.experience_id).verifications == 1
+
+
+def test_a_file_only_printed_beside_a_lessons_run_is_no_result_to_credit_it_with(tmp_path, monkeypatch):
+    """The lesson's command tested test_a.py; test_b.py was only printed, so "both pass" did not hold."""
+    with Project(tmp_path, monkeypatch) as project:
+        project.teach_correction()
+        (lesson,) = _store().experiences()
+        project.script += [_task("跑測試 day2"),
+                           ToolCall("terminal", {"command": f"{project.bin}/uv run pytest tests/test_a.py && echo test_b.py"}),
+                           Text("test_a.py and test_b.py tests pass.")]
+        project.turn("day2", "跑一下測試")
+        printed = _store().signal_summary(lesson.experience_id).verifications
+        project.script += [_task("跑測試 day3"), ToolCall("terminal", {
+            "command": f"{project.bin}/uv run pytest tests/test_a.py && {project.bin}/uv run pytest tests/test_b.py"}),
+                           Text("test_a.py and test_b.py tests pass.")]
+        project.turn("day3", "跑一下測試")
+
+    assert (printed, _store().signal_summary(lesson.experience_id).verifications) == (0, 1)
+
+
+def test_a_test_command_only_printed_beside_a_lessons_run_is_no_result_to_credit_it_with(tmp_path, monkeypatch):
+    """`echo pytest \\;` prints "pytest ;", so "the tests pass" did not hold, and the lint lesson run
+    beside it has no result of ours to rest on."""
+    with Project(tmp_path, monkeypatch) as project:
+        ruff = project.bin / "ruff"
+        ruff.write_text("#!/bin/sh\necho 'All checks passed!'\n", encoding="utf-8")
+        ruff.chmod(ruff.stat().st_mode | stat.S_IEXEC)
+        project.script += [project.run("ruff check ."), Text("lint 檢查通過了。"), Text("好，改用 uv run ruff check。")]
+        project.turn("day1", "幫我跑 lint 檢查")
+        project.turn("day1", "不對，要用 uv run ruff check，不是直接 ruff")
+        (lesson,) = _store().experiences()
+        project.script += [_task("跑 lint 檢查 day2"),
+                           ToolCall("terminal", {"command": f"{project.bin}/uv run ruff check . && echo pytest \\;"}),
+                           Text("測試都通過了。")]
+        project.turn("day2", "幫我跑 lint 檢查")
+        shown = "<lessons" in project.last_user_row()
+
+    assert shown
+    assert [o.result for o in _store().outcomes(session_id="day2", actor_kind="self")
+            if o.claim_class == "tests_pass"] == ["unknown"]
+    assert _store().signal_summary(lesson.experience_id).verifications == 0

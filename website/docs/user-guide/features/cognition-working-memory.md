@@ -85,10 +85,10 @@ own words teach:
   project; for every project only when you say so.
 - A correction ("不對，要用 uv run pytest") is kept on trial. It is put in force when you repeat it in
   another conversation or confirm it ("對，以後都這樣"), or, for a command, after it was followed
-  and worked in two tasks: the model ran that command itself (printing it, or `! cmd`, does not
-  count) and the run backs a result that held. Said again word for word (with the same exception)
-  it counts once more; any other wording — a turned direction, a moved "not", another exception —
-  replaces the old lesson.
+  and worked in two tasks: the model ran that command itself (printing it, or `! cmd` and
+  `time ! cmd`, does not count) and the run backs a result that held. Said again word for word
+  (with the same exception) it counts once more; any other wording — a turned direction, a moved
+  "not", another exception — replaces the old lesson.
 - "那條規則不對，忘掉它" / "forget that rule" withdraws the lesson just shown. "Forget the rule about
   ruff" (or its id) withdraws that one, even if another was shown; a name that matches no lesson of
   this project is asked about, never guessed. When it is not clear which lesson you mean, the model
@@ -114,8 +114,10 @@ own check, failed, or unverified; later corrected or confirmed by you), per task
 provider and Hermes version — never pooled. A subagent's or coding agent's report counts for that
 agent as "reported" until our own check, after the report, of what the report names confirms or
 refutes it: a check of `test_b` says nothing about a report on `test_a`, a report on both needs
-both, and a check made before the report says nothing about it. A command that only prints or
-searches (`echo 'uv run pytest'`) is not a test run, and `! cmd` does not show that `cmd` passed.
+both, and a check made before the report says nothing about it. In a command line of several
+commands, each one counts only for what it ran itself and where it ran: `pytest test_a.py && echo
+test_b.py` tested `test_a.py` alone. A command that only prints or searches (`echo 'uv run pytest'`,
+`echo pytest \;`) is not a test run, and `! cmd` or `time ! cmd` does not show that `cmd` passed.
 The same check run again by the same model counts once, on its first record, and your correction
 lands there; another model's rerun, or the same command on another file, port or id, is its own
 record. With fewer than
