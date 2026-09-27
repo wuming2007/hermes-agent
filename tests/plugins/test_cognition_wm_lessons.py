@@ -142,3 +142,40 @@ def test_the_kind_of_work_is_read_from_what_is_asked_when_no_task_says(text, ste
     from plugins.cognition_wm.lessons import work_kind
 
     assert work_kind(text, steps) == kind
+
+
+# ------------------------------------------------------------------ review round (2026-09-27)
+
+
+@pytest.mark.parametrize("said, again", [
+    ("Always use uv run pytest.", "Never use uv run pytest."),
+    ("以後都要用 uv run pytest", "以後都不要用 uv run pytest"),
+    ("use `uv run pytest` instead of `pytest`", "use `pytest` instead of `uv run pytest`"),
+    ("改用 uv run pytest，不要用 pytest", "改用 pytest，不要用 uv run pytest"),
+])
+def test_the_opposite_or_the_other_way_round_is_not_the_same_lesson_said_again(said, again):
+    assert not same_wording(said, again)
+
+
+@pytest.mark.parametrize("text", [
+    "Always deploy without approval.",
+    "Never ask before deploying.",
+    "以後部署不用等我同意",
+    "以後推 repo 不用問我",
+    "From now on you can just push to main.",
+])
+def test_a_wish_that_drops_an_approval_is_read_as_a_permission(text):
+    cue = read_cue(text)
+    assert cue is not None and cue.loosens
+
+
+@pytest.mark.parametrize("text", [
+    "Never deploy without approval.",
+    "Never push without asking me first.",
+    "From now on, don't merge without a review.",
+    "以後部署前都先問我",
+    "以後不要直接推 main",
+])
+def test_a_stricter_wish_is_not_a_permission(text):
+    cue = read_cue(text)
+    assert cue is not None and not cue.loosens

@@ -35,9 +35,10 @@ from plugins.cognition_wm.model import Experience, SourceRef, Task, clip
 from plugins.cognition_wm.provenance import RUN_ID, turn_source
 
 logger = logging.getLogger(__name__)
-LAST_TURN_KEY = "last_turn:{}"  # lineage -> the turn whose outcomes a correction marks
-EXPOSED_KEY = "exposed:{}"  # lineage -> the lessons shown in its latest turn
+LAST_TURN_KEY = "last_turn:{}"  # lineage -> the turn a correction answers, and the records its claims rest on
+EXPOSED_KEY = "exposed:{}"  # lineage -> the lessons shown in its latest turn (only those actually in the text)
 CHANGES_KEY = "changes:{}"  # lineage -> how many turns changed something (a check after one is new evidence)
+INTENT_NOTE = "lesson_intent"  # this turn's unsettled confirm or revoke: {"op", "ids"}; task_state settles one
 _CHANGING = frozenset({"write", "delegate_report"})
 _LIVE = ("candidate", "active", "stale")
 _CHAIN_DEPTH = 5
@@ -142,7 +143,8 @@ def _put_in_force_if_voiced_elsewhere(wm: ExperienceStore, lesson: Experience, o
 
 
 def _state_lesson(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue, *, focus: Optional[Task],
-                  steps: Sequence[str], request: str, shown: Sequence[str], model: str, provider: str) -> list[str]:
+                  steps: Sequence[str], request: str, shown: Sequence[str], model: str, provider: str,
+                  **_: Any) -> list[str]:
     """A directive or correction: said again, it counts once more; revised, it replaces the old one."""
     if cue.loosens:
         return []  # a permission, never a lesson: the task's authorization rules keep it
@@ -188,15 +190,40 @@ def _spoken_here(wm: ExperienceStore, state: runtime.TurnState, statuses: Sequen
     return found
 
 
-def _confirm_lesson(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue, *, shown: Sequence[str],
-                    **_: Any) -> list[str]:
-    """The owner confirms the tentative lesson just shown, else the latest one from this conversation."""
-    state.notes["lesson_intent"] = "confirmation"
-    tentative = [e for e in filter(None, (wm.experience(i) for i in shown)) if e.status == "candidate"]
-    tentative = tentative or _spoken_here(wm, state, ("candidate",))
-    if not tentative:
+def _which(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue, *, shown: Sequence[str],
+           previous_turn: Optional[str], statuses: Sequence[str]) -> tuple[Optional[Experience], list[Experience]]:
+    """The lesson an owner's confirm or revoke is about: among the lessons shown last turn (else those
+    of this conversation), the one their words name, else the only one, else — for a confirm — the
+    one made in the turn they answer. Returns it, or the lessons it could be when that cannot be told."""
+    pool = [e for e in filter(None, (wm.experience(i) for i in shown)) if e.status in statuses]
+    pool = pool or _spoken_here(wm, state, statuses)
+    words = set(search_terms(cue.text))
+    maybe = [e for e in pool if words & set(e.tags)] or pool
+    if len(maybe) == 1:
+        return maybe[0], []
+    recent = [e for e in maybe if previous_turn and e.origin.turn_id == previous_turn]
+    if cue.kind == "confirmation" and len(recent) == 1:
+        return recent[0], []
+    return None, maybe[:5]
+
+
+def _pending(state: runtime.TurnState, op: str, cue: LessonCue, maybe: Sequence[Experience]) -> list[str]:
+    """Unsure which lesson the owner means: the model may settle one of these, once, or ask."""
+    if not maybe:
         return []
-    lesson = max(tentative, key=lambda e: e.created_at)
+    state.notes[INTENT_NOTE] = {"op": op, "ids": [e.experience_id for e in maybe]}
+    choices = "; ".join(f'{e.experience_id} "{clip(e.behavior, 60)}"' for e in maybe)
+    return [f'Pending: the user asked to {op} a lesson ("{clip(cue.text, 120)}") without saying which. If it is one '
+            f'of these, {op} it with task_state (action "lesson", op "{op}", experience_id): {choices}. '
+            'Otherwise ask the user.']
+
+
+def _confirm_lesson(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue, *, shown: Sequence[str],
+                    previous_turn: Optional[str] = None, **_: Any) -> list[str]:
+    """The owner confirms a tentative lesson (``_which``); when it cannot be told which, it is pending."""
+    lesson, maybe = _which(wm, state, cue, shown=shown, previous_turn=previous_turn, statuses=("candidate",))
+    if lesson is None:
+        return _pending(state, "confirm", cue, maybe)
     owner = _owner(state)
     wm.add_signal(lesson.experience_id, source_class="user_confirmation", polarity=1,
                   evidence_key=f"msg:{state.lineage_root}:{_digest(cue.text)}", source=owner,
@@ -206,21 +233,12 @@ def _confirm_lesson(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCu
 
 
 def _revoke_lesson(wm: ExperienceStore, state: runtime.TurnState, cue: LessonCue, *, shown: Sequence[str],
-                   **_: Any) -> list[str]:
-    """The owner withdraws a lesson: the one just shown (or the one their words name), else the only
-    one from this conversation. When it cannot be told which, the model is asked to name it."""
-    state.notes["lesson_intent"] = "revoke"
-    live = [e for e in filter(None, (wm.experience(i) for i in shown)) if e.status in _LIVE]
-    words = set(search_terms(cue.text))
-    named = [e for e in live if words & set(e.tags)]
-    target = live[0] if len(live) == 1 else named[0] if len(named) == 1 else None
-    if target is None and not live:
-        here = _spoken_here(wm, state, _LIVE)
-        target = here[0] if len(here) == 1 else None
-    if target is None:
-        return [f'Pending: the user asked to drop a lesson ("{clip(cue.text, 120)}"). If it is one of these, '
-                'revoke it with task_state (action "lesson", op "revoke", experience_id).']
-    wm.set_experience_status(target.experience_id, "revoked", source=_owner(state))
+                   previous_turn: Optional[str] = None, **_: Any) -> list[str]:
+    """The owner withdraws a lesson (``_which``); when it cannot be told which, it is pending."""
+    lesson, maybe = _which(wm, state, cue, shown=shown, previous_turn=previous_turn, statuses=_LIVE)
+    if lesson is None:
+        return _pending(state, "revoke", cue, maybe)
+    wm.set_experience_status(lesson.experience_id, "revoked", source=_owner(state))
     return []
 
 
@@ -233,10 +251,11 @@ _CUE_ACTIONS: dict[str, Callable[..., list[str]]] = {
 
 def _relabel_last_turn(wm: ExperienceStore, state: runtime.TurnState, last: dict, cue: Optional[LessonCue],
                        text: str) -> None:
-    """The owner's word on the last answer. Saying a result did not hold marks our claims there
-    corrected; correcting how it was done leaves what they read and counts as the user's effort; a
-    confirmed result makes the unknown or reported ones there a success."""
-    there = wm.outcomes(session_id=last.get("session"), turn_id=last.get("turn"))
+    """The owner's word on the last answer, on the records its claims rest on (for a rerun, the first
+    record of that check). Saying a result did not hold marks our claims there corrected; correcting
+    how it was done leaves what they read and counts as the user's effort; a confirmed result makes
+    the unknown or reported ones there a success."""
+    there = [o for o in (wm.outcome(i) for i in last.get("outcomes") or ()) if o is not None]
     ours = [o.outcome_id for o in there if o.actor_kind == "self" and o.result not in ("corrected", "blocked")]
     corrected = correction_kind(cue, text)
     if corrected == "result":
@@ -266,7 +285,7 @@ def _before_turn(state: runtime.TurnState, text: str, history: Sequence[Any], *,
     focus = runtime.focus_task(state)
     notes: list[str] = []
     if state.owner:
-        shown = _meta(wm, EXPOSED_KEY.format(state.lineage_root)).get("ids") or []
+        exposed = _meta(wm, EXPOSED_KEY.format(state.lineage_root))
         # A stop, pause or resume is about this task, never a lesson; a limit may also be a standing wish.
         cue = read_cue(text) if state.intent is None or state.intent.kind == "restrict" else None
         last = _meta(wm, LAST_TURN_KEY.format(state.lineage_root))
@@ -276,20 +295,21 @@ def _before_turn(state: runtime.TurnState, text: str, history: Sequence[Any], *,
             steps = last_turn_steps(history)
             if focus is not None or steps or cue.kind in ("confirmation", "revoke"):
                 notes = _CUE_ACTIONS[cue.kind](wm, state, cue, focus=focus, steps=steps, request=last_request(history),
-                                               shown=shown, model=model, provider=provider)
+                                               shown=exposed.get("ids") or [], previous_turn=exposed.get("turn"),
+                                               model=model, provider=provider)
     lessons: list[Experience] = []
     if current.learning and state.owner:
         lessons = recall.select(wm, state, text=text, focus=focus, model=model, provider=provider,
                                 limit=int(current.lessons_max))
-        wm.set_meta(EXPOSED_KEY.format(state.lineage_root),
-                    json.dumps({"turn": state.turn_id, "ids": [lesson.experience_id for lesson in lessons]}))
     guidance: dict = {}
     record_lines: list[str] = []
     if current.calibration and focus is not None:  # plain chat is never checked harder
         guidance, record_lines = calibration.for_turn(wm, state, focus, model=model, provider=provider,
                                                       min_samples=int(current.calibration_min_samples))
-    body = recall.render_body(wm, lessons, record_lines=record_lines, notes=notes,
-                              max_chars=int(current.lessons_max_chars))
+    body, shown = recall.render_body(wm, lessons, record_lines=record_lines, notes=notes,
+                                     max_chars=int(current.lessons_max_chars))
+    if current.learning and state.owner:  # only the lessons in the text count as shown
+        wm.set_meta(EXPOSED_KEY.format(state.lineage_root), json.dumps({"turn": state.turn_id, "ids": shown}))
     if not body:
         return TurnLessons(guidance=guidance)
     return TurnLessons(context=recall.fence(body, history), verifier_body=f"{recall.VERIFIER_NOTE}\n{body}",
@@ -334,12 +354,13 @@ def _after_turn(state: runtime.TurnState, answer: str, history: Sequence[Any], *
     scope_key = f"conv:{state.lineage_root}:g{_changes(wm, state, report)}"
     drafts = outcomes.turn_outcomes(report, model=model, scope_key=scope_key,
                                     turn_key=f"{state.session_id}:{state.turn_id}")
+    recorded: dict[str, str] = {}
     if current.calibration:
-        _record(wm, state, drafts, task=task, finished=finished, model=model, provider=provider)
-        wm.set_meta(LAST_TURN_KEY.format(state.lineage_root),
-                    json.dumps({"session": state.session_id, "turn": state.turn_id}))
+        recorded = _record(wm, state, report, drafts, task=task, finished=finished, model=model, provider=provider)
+        wm.set_meta(LAST_TURN_KEY.format(state.lineage_root), json.dumps(
+            {"session": state.session_id, "turn": state.turn_id, "outcomes": sorted(set(recorded.values()))}))
     if current.learning:
-        _credit_followed(wm, state, report, drafts)
+        _credit_followed(wm, state, report, drafts, recorded)
 
 
 def _changes(wm: ExperienceStore, state: runtime.TurnState, report: Any) -> int:
@@ -354,18 +375,22 @@ def _changes(wm: ExperienceStore, state: runtime.TurnState, report: Any) -> int:
     return count
 
 
-def _record(wm: ExperienceStore, state: runtime.TurnState, drafts: Sequence[outcomes.OutcomeDraft], *,
-            task: Optional[Task], finished: Sequence[Task], model: str, provider: str) -> None:
+def _record(wm: ExperienceStore, state: runtime.TurnState, report: Any, drafts: Sequence[outcomes.OutcomeDraft], *,
+            task: Optional[Task], finished: Sequence[Task], model: str, provider: str) -> dict[str, str]:
+    """Record this turn's claimed results, and let our own checks settle earlier reports about what
+    they checked. Returns each result's key -> the record it rests on (for a rerun, the first one)."""
     version = runtime.environment(model, provider)["hermes_version"]
     asked = {"asks": int(state.notes.get("asks", 0)), "blocks": int(state.notes.get("blocks", 0))}
     common = dict(session_id=state.session_id, turn_id=state.turn_id, project_key=state.project_key,
                   provider=provider or "", hermes_version=version)
+    keys = []
     for draft in drafts:
         wm.record_outcome(evidence_key=draft.key, task_id=task.task_id if task else None,
                           task_kind=task.kind if task else "none", claim_class=draft.claim_class,
                           actor_kind=draft.actor_kind, actor_id=draft.actor_id, result=draft.result, reason=draft.reason,
                           evidence_ids=draft.evidence_ids, intervention=asked if draft.actor_kind == "self" else {},
-                          **common)
+                          claim=draft.claim, **common)
+        keys.append(draft.key)
     for done in finished:  # a task marked done: backed only when each deliverable cites our own checks
         verified = wm.verified_evidence_ids(done.task_id)
         deliverables = wm.items(done.task_id, kinds=("deliverable",))
@@ -375,32 +400,39 @@ def _record(wm: ExperienceStore, state: runtime.TurnState, drafts: Sequence[outc
                           claim_class="task", actor_kind="self", actor_id=model or "unknown-model",
                           result="success" if backed else "unknown", reason="" if backed else "done_without_evidence",
                           intervention={**asked, "user_turns": wm.owner_turns(done.task_id)}, **common)
-    # our own check settles what a subagent or coding agent reported earlier in the same work
-    ours = outcomes.own_verdicts(drafts)
-    if ours:
-        earlier = wm.outcomes(task_id=task.task_id) if task else wm.outcomes(session_id=state.session_id)
-        for claim_class, verdict in ours.items():
-            wm.relabel_outcomes([o.outcome_id for o in earlier if o.actor_kind != "self" and o.claim_class == claim_class
-                                 and o.result == "reported"], verdict, source=_checked_by_us(state, claim_class))
+        keys.append(f"task:{done.task_id}:done")
+    # a subagent's or coding agent's earlier report in the same work: settled only by a check of ours
+    # about what it names, never by one about something else
+    earlier = wm.outcomes(task_id=task.task_id) if task else wm.outcomes(session_id=state.session_id)
+    for old in earlier:
+        if old.actor_kind != "self" and old.result == "reported" and old.claim:
+            result, ids = outcomes.settle_report(old.claim, report.evidence)
+            if result != "reported":
+                wm.relabel_outcomes([old.outcome_id], result, source=_checked_by_us(state, ids[-1]))
+    return {key: found.outcome_id for key in keys if (found := wm.outcome_by_key(key)) is not None}
 
 
 def _credit_followed(wm: ExperienceStore, state: runtime.TurnState, report: Any,
-                     drafts: Sequence[outcomes.OutcomeDraft]) -> None:
-    """A lesson shown this turn, followed by a command of ours that worked: one count per
-    conversation, so opening more tasks never adds to it."""
+                     drafts: Sequence[outcomes.OutcomeDraft], recorded: dict[str, str]) -> None:
+    """A lesson shown this turn whose command we ran ourselves, where that run backs a result of ours
+    that held: one count per conversation, so opening more tasks never adds to it. The credit names
+    the record it rests on."""
     shown = _meta(wm, EXPOSED_KEY.format(state.lineage_root))
     if shown.get("turn") != state.turn_id:
         return
     if any(d.actor_kind == "self" and d.result in ("failure", "partial") for d in drafts):
         return
+    held = {i: d for d in drafts if d.actor_kind == "self" and d.result == "success" for i in d.evidence_ids}
     for lesson in filter(None, (wm.experience(i) for i in shown.get("ids") or ())):
-        hits = outcomes.followed(outcomes.command_markers(lesson.behavior), report.evidence)
+        hits = [hit for hit in outcomes.followed(outcomes.command_markers(lesson.behavior), report.evidence)
+                if hit.evidence_id in held]
         if lesson.status not in _LIVE or not hits:
             continue
-        checked = _checked_by_us(state, hits[-1].evidence_id)
+        backs = held[hits[-1].evidence_id]
+        checked = _checked_by_us(state, recorded.get(backs.key, backs.key))
         if not wm.add_signal(lesson.experience_id, source_class="tool_verified", polarity=1,
-                             evidence_key=f"conv:{state.lineage_root}",
-                             source=checked, lineage=state.lineage_root, detail=hits[-1].target):
+                             evidence_key=f"conv:{state.lineage_root}", source=checked, lineage=state.lineage_root,
+                             detail=f"{backs.claim_class}: {hits[-1].target}"):
             continue
         summary = wm.signal_summary(lesson.experience_id)
         promote = (lesson.status == "candidate" and lesson.kind in ("procedure", "fact")

@@ -333,21 +333,21 @@ def _confirmed(parts: list[tuple[str, str]]) -> set[int]:
     return shown
 
 
-def _outcomes(command: str, shown_by_caller: bool, depth: int) -> list[tuple[str, bool]]:
+def _outcomes(command: str, shown_by_caller: bool, depth: int, peel: bool = True) -> list[tuple[str, bool]]:
     parts = _scan(command)
     opaque = any(op in _OPAQUE_OPS for _step, op in parts) or "<<" in command
     shown = set() if opaque or not shown_by_caller else _confirmed(parts)
     out: list[tuple[str, bool]] = []
-    for position, (step, _op) in enumerate(parts):
-        step = _peel(step)
+    for position, (written, _op) in enumerate(parts):
+        step = _peel(written)
         if not step:
             continue
         nested = _SHELL_C.search(step) or _EVAL.search(step)
         if nested and depth < _MAX_DEPTH:
             body, _rest = _unquote(nested["body"])
-            out.extend(_outcomes(body, position in shown, depth + 1))
+            out.extend(_outcomes(body, position in shown, depth + 1, peel))
         else:
-            out.append((step, position in shown))
+            out.append((step if peel else written, position in shown))
     return out
 
 
@@ -358,6 +358,30 @@ def step_outcomes(command: str) -> tuple[tuple[str, bool], ...]:
     under ``set -e``): ``a || b`` shows neither, ``a; b`` shows only ``b``. A nested ``bash -c`` is
     followed inside; subshells, substitutions and here-documents show nothing."""
     return tuple(_outcomes(command or "", True, 0))
+
+
+def executed_commands(command: str) -> tuple[tuple[str, bool], ...]:
+    """``step_outcomes`` with each simple command as written, its wrappers kept (``uv run pytest -q``,
+    not ``pytest -q``): what a request to run one particular command is compared with."""
+    return tuple(_outcomes(command or "", True, 0, peel=False))
+
+
+def invokes(step: str, command: str) -> bool:
+    """Whether a simple command runs ``command`` (its words, options aside), perhaps behind wrappers
+    such as ``sudo`` or ``FOO=1``: ``sudo uv run pytest -q`` runs ``uv run pytest``; ``pytest -q``
+    and ``echo 'uv run pytest'`` do not."""
+    wanted = [word for word in command.lower().split() if not word.startswith("-")]
+    for _ in range(16):
+        words = [word for word in step.lower().split() if not word.startswith("-")]
+        if words:
+            words[0] = words[0].rsplit("/", 1)[-1]
+        if wanted and words[:len(wanted)] == wanted:
+            return True
+        peeled = _WRAPPER.sub("", step, count=1).lstrip("'\" \t")
+        if peeled == step:
+            return False
+        step = peeled
+    return False
 
 
 def is_agent_run(step: str) -> bool:

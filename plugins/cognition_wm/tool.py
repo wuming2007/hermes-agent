@@ -13,7 +13,8 @@ from functools import partial
 from typing import Any, Callable, Optional
 
 from plugins.cognition_wm import runtime, snapshot
-from plugins.cognition_wm.lessons import same_topic, search_terms, topic_terms
+from plugins.cognition_wm.learning import INTENT_NOTE
+from plugins.cognition_wm.lessons import loosens, same_topic, search_terms, topic_terms
 from plugins.cognition_wm.model import (
     ACTION_CLASSES,
     EXPERIENCE_KINDS,
@@ -168,8 +169,12 @@ def _show(args: dict, turn: runtime.TurnState, source) -> dict:
 
 
 def _propose(spec: dict, turn: runtime.TurnState, _source) -> dict:
-    """A lesson the model draws from the work: a candidate in its own name, whoever's turn it is."""
+    """A lesson the model draws from the work: a candidate in its own name, whoever's turn it is. One
+    that would drop a check or an approval is refused, as it is from the user's own words."""
     behavior = str(spec.get("behavior") or "").strip()
+    if loosens(f"{behavior} {spec.get('exceptions') or ''}"):
+        raise WorkingMemoryError("a lesson never drops a check or an approval; that stays with each task's own "
+                                 "authorization, which only the user gives")
     wm, focus = runtime.store(), runtime.focus_task(turn)
     topic = topic_terms(behavior)
     for lesson in wm.experiences(project_key=turn.project_key, statuses=("candidate", "active", "stale")):
@@ -188,26 +193,29 @@ def _propose(spec: dict, turn: runtime.TurnState, _source) -> dict:
     return {"experience_id": lesson.experience_id, "status": lesson.status}
 
 
-def _settle(spec: dict, turn: runtime.TurnState, source, *, intent: str, status: str) -> dict:
-    """The user's own confirm or revoke of a lesson, recorded by id: only on a turn where they said it."""
-    if not turn.owner or turn.notes.get("lesson_intent") != intent:
-        raise ProvenanceError(f"the user did not ask to {'confirm' if status == 'active' else 'revoke'} a lesson "
-                              "in this turn; only their own words do")
+def _settle(spec: dict, turn: runtime.TurnState, source, *, op: str, status: str) -> dict:
+    """The user's own confirm or revoke of a lesson, recorded by id: only on a turn where they asked
+    for it without saying which, only for one of the lessons they could have meant, and only once."""
+    pending = turn.notes.get(INTENT_NOTE) or {}
+    wanted = str(spec.get("experience_id") or "")
+    if not turn.owner or pending.get("op") != op or wanted not in pending.get("ids", ()):
+        raise ProvenanceError(f"the user did not ask to {op} this lesson in this turn; only their own words do")
     wm = runtime.store()
-    lesson = wm.experience(str(spec.get("experience_id") or ""))
+    lesson = wm.experience(wanted)
     if lesson is None or (lesson.scope == "project" and lesson.project_key != turn.project_key):
         raise WorkingMemoryError("no such lesson in this project")
     if status == "active":
         wm.add_signal(lesson.experience_id, source_class="user_confirmation", polarity=1, source=source,
                       evidence_key=f"msg:{turn.lineage_root}:{turn.turn_id}:confirm", lineage=turn.lineage_root)
     lesson = wm.set_experience_status(lesson.experience_id, status, source=source)
+    turn.notes.pop(INTENT_NOTE, None)  # one request settles one lesson
     return {"experience_id": lesson.experience_id, "status": lesson.status}
 
 
 _LESSON_OPS: dict[str, Callable[[dict, runtime.TurnState, Any], dict]] = {
     "propose": _propose,
-    "confirm": partial(_settle, intent="confirmation", status="active"),
-    "revoke": partial(_settle, intent="revoke", status="revoked"),
+    "confirm": partial(_settle, op="confirm", status="active"),
+    "revoke": partial(_settle, op="revoke", status="revoked"),
 }
 
 

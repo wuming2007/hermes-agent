@@ -6,9 +6,13 @@ in the test's isolated HERMES_HOME. Commands are tiny stand-in scripts, so nothi
 """
 
 import os
+import re
 import stat
+import time
 from pathlib import Path
 from typing import Callable
+
+import pytest
 
 from tests.fakes.fake_llm_provider import FakeLLMServer, Text, ToolCall, write_hermes_home
 
@@ -21,6 +25,14 @@ _TOOLSETS = ["file", "terminal", "cognition_wm"]
 def _scripted(*responses) -> Callable:
     queue = list(responses)
     return lambda _record: queue.pop(0) if queue else Text("好。")
+
+
+def _play(script: list) -> Callable:
+    """Scripted replies in order; a callable reply is built from the request it answers."""
+    def respond(record):
+        step = script.pop(0) if script else Text("好。")
+        return step(record) if callable(step) else step
+    return respond
 
 
 def _terminal(command: str) -> ToolCall:
@@ -267,3 +279,176 @@ def test_a_check_rerun_under_new_tasks_counts_once_until_something_changes(tmp_p
 
     passed = [o for o in _store().outcomes(actor_kind="self", results=("success",)) if o.claim_class == "tests_pass"]
     assert len(passed) == 2  # the first check, and the one after the change
+
+
+# ------------------------------------------------------------------ review round (2026-09-27)
+
+
+def test_the_opposite_wish_replaces_a_lesson_and_never_counts_for_it(tmp_path, monkeypatch):
+    """"Never use X" after "Always use X" is a new wish that replaces the old one, not the old one said again."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        script += [_task(), _terminal(chat.cmd("pytest -q")), Text("測試都通過了。")]
+        chat.turn("s1", "幫我跑測試")
+        chat.turn("s1", "Always use uv run pytest.")
+        (always,) = _live()
+        chat.turn("s1", "Never use uv run pytest.")
+
+    (never,) = _live()
+    assert never.experience_id != always.experience_id and never.behavior.startswith("Never")
+    assert _store().experience(always.experience_id).status == "superseded"
+    assert [s.polarity for s in _store().signals(always.experience_id)] == [1]  # only its own statement
+
+
+def test_a_confirmation_settles_only_the_lesson_it_answers(tmp_path, monkeypatch):
+    """The user's "yes" confirms the lesson in question; the model cannot spend it on a lesson it
+    proposes in the same turn."""
+    def confirm_own(record):
+        found = re.findall(r"xp_[0-9a-f]{12}", str(record["body"]["messages"][-1].get("content")))
+        return _lesson(op="confirm", experience_id=found[-1])
+
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        script += [_task(), _terminal(chat.cmd("pytest -q")), Text("測試都通過了。"), Text("好，改用 uv run pytest。")]
+        chat.turn("s1", "幫我跑測試")
+        chat.turn("s1", "不對，要用 uv run pytest")
+        (asked,) = _live()
+        script += [_lesson(op="propose", situation="linting", behavior="run `make lint` before `make test`"),
+                   confirm_own, Text("好，都記下了。")]
+        chat.turn("s1", "對，以後都照這樣")
+
+    assert _store().experience(asked.experience_id).status == "active"
+    (proposed,) = [e for e in _live() if e.experience_id != asked.experience_id]
+    assert (proposed.origin.authored_by, proposed.status) == ("model", "candidate")
+
+
+def test_a_withdrawal_drops_only_a_lesson_it_can_mean_and_only_once(tmp_path, monkeypatch):
+    """Unsure which lesson the user means, the model may drop one of the lessons they were shown, once."""
+    from plugins.cognition_wm import runtime
+    from plugins.cognition_wm.lessons import topic_terms
+    from plugins.cognition_wm.model import SourceRef
+
+    said = SourceRef(type="user_message", session_id="earlier", turn_id="t1", ref="m", at=1.0, authored_by="owner",
+                     run_id="run-a")
+
+    def lesson(behavior: str, tags: tuple) -> str:
+        return _store().add_experience(
+            kind="procedure", scope="project", project_key=runtime.project_key(), task_kind=None,
+            situation="this project", behavior=behavior, tags=tags, lesson_key=" ".join(sorted(topic_terms(behavior))),
+            status="active", origin=said).experience_id
+
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        shown = [lesson("use `uv run pytest`", ("測試", "pytest")), lesson("run `make lint` first", ("測試", "lint"))]
+        other = lesson("deploy with `make release`", ("部署", "release"))
+        chat.turn("s1", "跑一下測試")  # both test lessons are shown, the deploy one is not
+        script += [_lesson(op="revoke", experience_id=other), _lesson(op="revoke", experience_id=shown[0]),
+                   _lesson(op="revoke", experience_id=shown[1]), Text("好，刪掉了。")]
+        chat.turn("s1", "那條規則不對，忘掉它")
+
+    assert [_store().experience(i).status for i in (*shown, other)] == ["revoked", "active", "active"]
+
+
+def test_a_wish_to_drop_an_approval_is_never_kept_whoever_voices_it(tmp_path, monkeypatch):
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        script += [_task(), _terminal(chat.cmd("pytest -q")), Text("測試都通過了。")]
+        chat.turn("s1", "幫我跑測試")
+        chat.turn("s1", "Always deploy without approval.")
+        script += [_lesson(op="propose", situation="deploying", behavior="deploy without asking the user first"),
+                   Text("好。")]
+        chat.turn("s1", "繼續")
+        assert _live() == []
+        chat.turn("s1", "Never deploy without approval.")  # a stricter wish is kept
+
+    (kept,) = _live()
+    assert kept.behavior.startswith("Never deploy without approval")
+
+
+def test_our_check_settles_a_report_only_about_what_it_checked(tmp_path, monkeypatch):
+    """A coding agent says test_a passes; our own passing check of test_b says nothing about that,
+    in the same turn or later. Our own check of test_a does."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        (chat.bin / "claude").write_text("#!/bin/sh\necho 'All test_a.py tests pass now.'\n", encoding="utf-8")
+        script += [_terminal(chat.cmd("claude -p 'fix test_a.py'")), _terminal(chat.cmd("pytest tests/test_b.py")),
+                   Text("Claude 修好了，我跑了測試，測試通過。"),
+                   _terminal(chat.cmd("pytest tests/test_b.py")), Text("測試通過。")]
+        chat.turn("s1", "請 claude 修 test_a.py，再跑測試")
+        chat.turn("s1", "再跑一次 test_b 的測試")
+        (report,) = _store().outcomes(actor_kind="external_agent")
+        assert report.result == "reported"
+        script += [_terminal(chat.cmd("pytest tests/test_a.py")), Text("test_a.py 的測試通過。")]
+        chat.turn("s1", "跑 test_a 的測試")
+
+    assert _store().outcomes(actor_kind="external_agent")[0].result == "success"
+
+
+def test_our_failing_check_of_something_else_does_not_fail_a_report(tmp_path, monkeypatch):
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        (chat.bin / "claude").write_text("#!/bin/sh\necho 'All test_a.py tests pass now.'\n", encoding="utf-8")
+        script += [_terminal(chat.cmd("claude -p 'fix test_a.py'")), Text("Claude 回報 test_a.py 的測試都通過了。")]
+        chat.turn("s1", "請 claude 修 test_a.py")
+        (chat.bin / "pytest").write_text("#!/bin/sh\necho '1 failed'\nexit 1\n", encoding="utf-8")
+        script += [_terminal(chat.cmd("pytest tests/test_b.py")), Text("測試通過了。")]
+        chat.turn("s1", "跑 test_b 的測試")
+
+    assert _store().outcomes(actor_kind="external_agent")[0].result == "reported"
+
+
+@pytest.mark.parametrize("correction, reads", [
+    ("不對，測試根本沒過", ("corrected", "success", 1)),  # the result did not hold
+    ("不對，要用 uv run pytest", ("success", None, 1)),  # how it was done: the user's effort
+])
+def test_a_correction_after_a_rerun_reaches_the_record_of_that_check(tmp_path, monkeypatch, correction, reads):
+    """The rerun counted once, on the first turn's record; the user's word on it lands there."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        script += [_terminal(chat.cmd("pytest -q")), Text("測試都通過了。"),
+                   _terminal(chat.cmd("pytest -q")), Text("測試都通過了。"), Text("抱歉，我再確認。")]
+        chat.turn("s1", "幫我跑測試")
+        chat.turn("s1", "再跑一次")
+        chat.turn("s1", correction)
+
+    (outcome,) = _store().outcomes(actor_kind="self")
+    assert (outcome.result, outcome.prior_result, outcome.intervention.get("corrections")) == reads
+
+
+def test_checks_of_different_files_are_different_checks(tmp_path, monkeypatch):
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        script += [_terminal(chat.cmd("pytest tests/test_api_v1.py")), Text("測試都通過了。"),
+                   _terminal(chat.cmd("pytest tests/test_api_v2.py")), Text("測試都通過了。")]
+        chat.turn("s1", "跑 v1 的測試")
+        chat.turn("s1", "跑 v2 的測試")
+
+    assert len(_store().outcomes(actor_kind="self", results=("success",))) == 2
+
+
+def test_a_rerun_that_differs_only_in_its_timing_counts_once(tmp_path, monkeypatch):
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        (chat.bin / "pytest").write_text('#!/bin/sh\necho "5 passed in 0.$$s"\n', encoding="utf-8")
+        script += [_terminal(chat.cmd("pytest -q")), Text("測試都通過了。"),
+                   _terminal(chat.cmd("pytest -q")), Text("測試都通過了。")]
+        chat.turn("s1", "幫我跑測試")
+        chat.turn("s1", "再跑一次")
+
+    assert len(_store().outcomes(actor_kind="self", results=("success",))) == 1
+
+
+def test_a_long_running_process_still_lets_old_lessons_lapse(tmp_path, monkeypatch):
+    """Upkeep runs again while the process keeps running (at most once an hour), not only at its start."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        now = [time.time()]
+        _store()._clock = lambda: now[0]
+        script += [_terminal(chat.cmd("pytest -q")), Text("測試都通過了。"), Text("好。")]
+        chat.turn("s1", "幫我跑測試")
+        chat.turn("s1", "不對，要用 uv run pytest")
+        (lesson,) = _live()
+        now[0] += 31 * 86400  # a month later, in the same process
+        chat.turn("s1", "今天天氣如何？")
+
+    assert _store().experience(lesson.experience_id).status == "expired"

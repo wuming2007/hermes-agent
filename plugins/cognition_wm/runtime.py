@@ -58,7 +58,8 @@ _lock = threading.Lock()
 _stores: dict[str, ExperienceStore] = {}
 _turns: dict[tuple[str, str], TurnState] = {}
 _chains: dict[tuple[str, str], tuple[str, ...]] = {}
-_pruned: set[str] = set()
+_upkept: dict[str, float] = {}  # profile home -> when its upkeep last ran (by its store's clock)
+UPKEEP_EVERY = 3600.0  # seconds between upkeeps of one profile in a long-running process
 
 
 def environment(model: str, provider: str) -> dict:
@@ -133,19 +134,21 @@ def lineage_root(session_id: str) -> str:
     return _compression_chain(session_id)[0]
 
 
-def prune_once() -> None:
-    """Apply evidence retention the first time this process touches a profile's store, and let
-    unsupported experiences lapse when learning or calibration is on."""
-    key = home_key()
+def upkeep() -> None:
+    """Apply evidence retention, and let unsupported experiences lapse and old results go when
+    learning or calibration is on: the first time this process touches a profile's store, then at
+    most once an hour, so a CLI that runs for weeks keeps its limits without scanning every turn."""
+    key, wm = home_key(), store()
+    now = wm.now()
     with _lock:
-        if key in _pruned:
+        if key in _upkept and now - _upkept[key] < UPKEEP_EVERY:
             return
-        _pruned.add(key)
-    store().prune_evidence()
+        _upkept[key] = now
+    wm.prune_evidence()
     current = settings()
     if current.learning or current.calibration:
-        store().maintain(expire_after_days=float(current.expire_after_days),
-                         stale_after_days=float(current.stale_after_days))
+        wm.maintain(expire_after_days=float(current.expire_after_days),
+                    stale_after_days=float(current.stale_after_days))
 
 
 def remember_turn(state: TurnState) -> None:

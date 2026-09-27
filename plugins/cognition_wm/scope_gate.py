@@ -15,8 +15,11 @@
   whose effect cannot be told is asked about.
 - Shell commands and ``execute_code`` scripts are read through ``agent.command_effects``, however
   they are wrapped.
-- Read-only tools, ``task_state``, ``clarify`` and Hermes's own UI tools are never gated, and
-  working-memory state and lessons are never written into long-term memory.
+- Read-only tools, ``task_state``, ``clarify`` and Hermes's own UI tools are never gated.
+- A memory or skill write that carries working-memory markers, or repeats a kept lesson word for
+  word, is refused: a copy there would outlive the lesson's revocation. This is a check on what is
+  written, not an isolation of where it came from: the background memory review replays earlier
+  turns as they were sent (lessons included, for prompt-cache parity), and a reworded copy passes.
 
 Errors never block: the gate says nothing and the normal approval rules apply.
 """
@@ -39,6 +42,7 @@ from agent.command_effects import (
 )
 from agent.tool_result_classification import NO_EFFECT_TOOL_NAMES
 from plugins.cognition_wm import provenance, runtime
+from plugins.cognition_wm.lessons import normalized
 from plugins.cognition_wm.model import clip
 
 logger = logging.getLogger(__name__)
@@ -87,6 +91,9 @@ _EFFECT_CLASSES = {
     AGENT_LAUNCH: "coding_agent_launch", MIGRATION: "data_migration", DEPLOY: "deploy_restart",
     REPO_CHANGE: "repo_write", FILE_WRITE: "code_change", UNKNOWN: UNKNOWN_EFFECT,
 }
+# Long-term stores the model writes (memory, and skills: procedure kept for good) -> the fields that carry
+# what is written. Working-memory state and lessons are kept by Hermes, where they can be revoked.
+_LONG_TERM_TEXT = {"memory": frozenset({"content"}), "skill_manage": frozenset({"content", "file_content", "new_string"})}
 _WM_TRACE = re.compile(r"<working-memory|<lessons\b|\b(?:t|xp)_[0-9a-f]{12}\b|internal task state kept by Hermes"
                        r"|lessons from earlier work")
 _STOPPED = {"paused": "paused", "cancelled": "cancelled"}
@@ -221,11 +228,33 @@ def decide(tool_name: str, args: Any, turn: runtime.TurnState, settings: runtime
     return next((d for d in found if d["action"] == "block"), found[0] if found else None)
 
 
+def _written(value: Any, fields: frozenset) -> list[str]:
+    """The text a long-term write would keep, nested operations included."""
+    if isinstance(value, dict):
+        return [text for key, item in value.items()
+                for text in ([item] if key in fields and isinstance(item, str) else _written(item, fields))]
+    if isinstance(value, list):
+        return [text for item in value for text in _written(item, fields)]
+    return []
+
+
+def _copies_a_lesson(text: str, session_id: str) -> bool:
+    """Whether a long-term write repeats, word for word, a lesson Hermes keeps for this project: the
+    copy would outlive the lesson's revocation. A reworded copy is not caught."""
+    turn = runtime.current_turn(session_id)
+    kept = runtime.store().experiences(project_key=turn.project_key if turn else runtime.project_key(),
+                                       statuses=("candidate", "active", "stale"))
+    flat = normalized(text)
+    return any(len(core) >= 12 and core in flat for core in (normalized(lesson.behavior) for lesson in kept))
+
+
 def on_pre_tool_call(*, tool_name: str = "", args: Any = None, session_id: str = "", **_: Any) -> Optional[dict]:
     try:
-        if tool_name == "memory" and _WM_TRACE.search(str((args or {}).get("content") or "")):
+        written = "\n".join(_written(args or {}, _LONG_TERM_TEXT.get(tool_name, frozenset())))
+        if written and (_WM_TRACE.search(written) or _copies_a_lesson(written, session_id)):
             return {"action": "block", "message": "BLOCKED: working-memory state and lessons are kept by Hermes "
-                                                  "and must not be stored in long-term memory."}
+                                                  "(hermes cognition lessons) and must not be copied into long-term "
+                                                  "memory or skills."}
         turn = runtime.current_turn(session_id)
         if turn is None:
             return None

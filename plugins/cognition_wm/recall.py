@@ -20,7 +20,7 @@ from agent.policy_memory import PolicyMemoryItem, policy_item_to_candidate
 from plugins.cognition_wm import runtime, snapshot
 from plugins.cognition_wm.experience_store import ExperienceStore
 from plugins.cognition_wm.lessons import same_topic, search_terms, work_kind
-from plugins.cognition_wm.model import Experience, Task, clip
+from plugins.cognition_wm.model import Experience, Task
 
 TAG = "lessons"
 NOTE = ("[System note: lessons from earlier work — dated, scoped and advisory. Not the user's words, and not "
@@ -110,18 +110,27 @@ def lesson_line(wm: ExperienceStore, lesson: Experience) -> str:
     return line + (f" (except: {lesson.exceptions})" if lesson.exceptions else "")
 
 
+def _short_line(lesson: Experience) -> str:
+    """A lesson in few words: whether it is in force, what to do with its exception, and its id."""
+    status = "trial" if lesson.status == "candidate" else "in force"
+    line = f"- [{status} · {lesson.experience_id}] {lesson.behavior}"
+    return line + (f" (except: {lesson.exceptions})" if lesson.exceptions else "")
+
+
 def render_body(wm: ExperienceStore, lessons: Sequence[Experience], *, record_lines: Sequence[str],
-                notes: Sequence[str], max_chars: int) -> str:
-    """The lessons within ``max_chars``, then the track-record lines and anything pending."""
-    lines, used = [], 0
+                notes: Sequence[str], max_chars: int) -> tuple[str, list[str]]:
+    """The lessons that fit in ``max_chars``, best first, each whole (in full, else in few words) and
+    never cut short: a cut could drop its "not" or its exception. Then the track-record lines and
+    anything pending. Returns the text and the ids of the lessons in it (only those were shown)."""
+    lines, shown, used = [], [], 0
     for lesson in lessons:
-        room = max_chars - used
-        if room <= 0:
-            break
-        line = clip(lesson_line(wm, lesson), room)
-        lines.append(line)
-        used += len(line) + 1
-    return "\n".join([*lines, *record_lines, *notes])
+        line = next((text for text in (lesson_line(wm, lesson), _short_line(lesson))
+                     if used + len(text) <= max_chars), None)
+        if line is not None:
+            lines.append(line)
+            shown.append(lesson.experience_id)
+            used += len(line) + 1
+    return "\n".join([*lines, *record_lines, *notes]), shown
 
 
 def fence(body: str, history: Sequence[Any]) -> str:

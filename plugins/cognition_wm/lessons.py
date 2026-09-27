@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Optional, Sequence
 
 from plugins.cognition_wm.model import BEHAVIOR_MAX, EXCEPTIONS_MAX, clip
@@ -68,15 +69,37 @@ _NEGATIVE_RESULT = re.compile(
     r"沒過|沒有過|沒有通過|沒通過|失敗|不行|沒成功|壞了|不能用|沒(?:有)?(?:部署|上線|生效|更新|改到|跑|完成|修好)"
     r"|\bfail(?:s|ed|ing)?\b|\bbroken\b|\bdoesn'?t\s+work\b|\bnot\s+working\b|\bnever\s+(?:ran|deployed)\b",
     re.IGNORECASE)
-# Words that would take away a check or an approval: a permission, never a lesson.
+# Words that would take away a check or an approval: a permission, never a lesson, whoever says it.
+_APPROVAL_ZH = r"(?:同意|確認|批准|核准|審核|審查|允許)"
 _LOOSENS = re.compile(
-    r"不用(?:再)?(?:問|確認|檢查|測試|跑測試)|不必(?:再)?(?:問|確認)|不需要(?:再)?(?:問|確認)|免問|不用經過我"
+    rf"不用(?:再)?(?:問|確認|檢查|測試|跑測試|等我|經過我|我(?:的)?{_APPROVAL_ZH})"
+    rf"|(?:不必|不需要)(?:再)?(?:問|確認|檢查|等我|經過我|我(?:的)?{_APPROVAL_ZH})|免(?:問|審|核准|確認)|自動(?:核准|批准)"
     r"|(?<!不要)(?<!別)(?<!不能)(?<!不可以)直接(?:推|部署|上線|改|寄|發|提交|執行|合併|merge|push|deploy)"
-    r"|跳過(?:測試|檢查|確認|審查)"
-    r"|\bno\s+need\s+to\s+(?:ask|check|confirm|test)\b|\bdon'?t\s+(?:bother\s+)?(?:ask|check|confirm)(?:ing)?\b"
-    r"|\bwithout\s+asking\b|\byou\s+can\s+just\s+(?:push|deploy|merge|commit|send)\b"
-    r"|(?<!n't )(?<!not )\bjust\s+(?:push|deploy|merge|commit|send)\b|\bskip\s+(?:the\s+)?(?:tests?|checks?|review)\b",
+    r"|跳過(?:測試|檢查|確認|審查|審核|核准)"
+    r"|\bno\s+need\s+(?:to|for)\s+(?:(?:my|an?|the|your)\s+)?(?:ask|check|confirm|approv|review|test)\w*"
+    r"|\b(?:don'?t|do\s+not|never|no\s+longer)\s+(?:need\s+to\s+)?(?:bother\s+)?(?:ask(?:ing)?|confirm(?:ing)?"
+    r"|check(?:ing)?\s+with\s+me|wait(?:ing)?\s+for\s+(?:my\s+)?(?:approval|confirmation|review))\b"
+    r"|\byou\s+can\s+just\s+(?:push|deploy|merge|commit|send|delete)\b"
+    r"|(?<!n't )(?<!not )\bjust\s+(?:push|deploy|merge|commit|send)\b"
+    r"|\bskip\s+(?:the\s+)?(?:tests?|checks?|review|approval|confirmation)\b|\bauto-?approve\b",
     re.IGNORECASE)
+# "... without approval" drops it, unless the doing itself is what is ruled out ("never deploy
+# without approval" keeps asking).
+_WITHOUT = re.compile(r"\bwithout\s+(?:(?:my|an?|the|your|any)\s+)?(?:approval|asking|permission|confirm(?:ation|ing)?"
+                      r"|review(?:ing)?|checking|tests?|testing)\b", re.IGNORECASE)
+_RULED_OUT = re.compile(r"\b(?:never|don'?t|do\s+not|must\s+not|mustn'?t|should\s+not|shouldn'?t)\s+(?:[\w'-]+\s+){1,4}$",
+                        re.IGNORECASE)
+# What turns a command named after these words into the one to avoid ("instead of `pytest`",
+# "不要用 pytest"); a clause break ends their reach, and "or" carries it to the next command.
+_AVOIDS = re.compile(r"\b(?:instead\s+of|rather\s+than|not|never|don'?t(?!\s+forget)|do\s+not(?!\s+forget)|avoid"
+                     r"|stop\s+using|no\s+longer)\b|而不是|不是|不要(?!忘)|不用|不必|別(?!忘)|不可以|不能|不准|禁止|避免|取代",
+                     re.IGNORECASE)
+_CLAUSE = re.compile(r"[，,。.;；:：!！?？\n]|\bbut\b|但是?|然後", re.IGNORECASE)
+_ALSO = re.compile(r"^\s*(?:or|and|nor|/|、|和|或|或是|及|跟)?\s*$", re.IGNORECASE)
+# Words that turn a wish around: "never use X" is not "always use X" said again.
+_NEGATES = re.compile(r"不要|不用|不必|不可以|不能|不准|不是|禁止|避免|別|勿"
+                      r"|\b(?:never|not|no|don'?t|doesn'?t|avoid|stop|without|instead)\b", re.IGNORECASE)
+_WORD = re.compile(r"[A-Za-z][\w.+'-]*|[\u3400-\u9fff\uf900-\ufaff]+")
 _EVERYWHERE = re.compile(
     r"所有(?:的)?專案|每個專案|全部(?:的)?專案|任何專案|不管(?:是)?哪個專案|所有地方"
     r"|\beverywhere\b|\bin\s+(?:all|every|any)\s+(?:projects?|repos?(?:itories)?)\b|\bglobally\b", re.IGNORECASE)
@@ -144,6 +167,14 @@ class LessonDraft:
     lesson_key: str
 
 
+def loosens(text: str) -> bool:
+    """Whether words would drop a check or an approval ("deploy without asking", "以後推 repo 不用問我"):
+    a permission, which the task's own authorization rules keep, never a lesson, whoever says it. A
+    stricter wish ("never deploy without approval", "以後部署前都先問我") is not one."""
+    flat = " ".join(str(text or "").split())
+    return bool(_LOOSENS.search(flat)) or any(not _RULED_OUT.search(flat[:m.start()]) for m in _WITHOUT.finditer(flat))
+
+
 def read_cue(text: str) -> Optional[LessonCue]:
     """What the owner's message teaches, or None."""
     flat = " ".join(str(text or "").split())
@@ -154,8 +185,7 @@ def read_cue(text: str) -> Optional[LessonCue]:
             continue
         if kind in _TEACHES and not _TEACHES[kind].search(flat):
             continue
-        return LessonCue(kind, clip(flat, 400), everywhere=bool(_EVERYWHERE.search(flat)),
-                         loosens=bool(_LOOSENS.search(flat)))
+        return LessonCue(kind, clip(flat, 400), everywhere=bool(_EVERYWHERE.search(flat)), loosens=loosens(flat))
     return None
 
 
@@ -190,9 +220,9 @@ def _ascii_terms(text: str) -> list[str]:
     return [word for word in words if len(word) >= 2 and word not in _ASCII_STOP]
 
 
-def _bigrams(text: str, *, drop_common: bool = True) -> list[str]:
+def _bigrams(text: str) -> list[str]:
     grams = [run[i:i + 2] for run in _CJK_RUN.findall(text or "") for i in range(len(run) - 1)]
-    return [gram for gram in grams if not drop_common or gram not in _CJK_STOP]
+    return [gram for gram in grams if gram not in _CJK_STOP]
 
 
 def search_terms(text: str) -> list[str]:
@@ -213,17 +243,48 @@ def same_topic(a: frozenset, b: frozenset) -> bool:
     return len(shared) >= 2 and len(shared) / min(len(a), len(b)) >= 0.6
 
 
-def _normalized(text: str) -> str:
+def normalized(text: str) -> str:
+    """Text with case, spacing and punctuation aside."""
     return re.sub(r"[\W_]+", "", (text or "").lower())
 
 
+def _wording(text: str) -> list[str]:
+    """A lesson's words in order, the small ones too: what it says, not only what it is about."""
+    words: list[str] = []
+    for token in _WORD.findall(text or ""):
+        if token.isascii():
+            words.append(token.lower().strip(".-+'"))
+        else:
+            words += [token[i:i + 2] for i in range(len(token) - 1)] or [token]
+    return [word for word in words if word]
+
+
 def same_wording(a: str, b: str) -> bool:
-    """The same lesson said again (punctuation and spacing aside), not a revised one."""
-    if _normalized(a) == _normalized(b):
+    """The same lesson said again (punctuation and spacing aside), not a revised or an opposite one:
+    the same words in the same order, and a "not" or an "instead" in one only if the other has it."""
+    if normalized(a) == normalized(b):
         return True
-    terms_a = set(_ascii_terms(a) + _bigrams(a, drop_common=False))
-    terms_b = set(_ascii_terms(b) + _bigrams(b, drop_common=False))
-    return bool(terms_a and terms_b) and len(terms_a & terms_b) / len(terms_a | terms_b) >= 0.8
+    if sorted(m.lower() for m in _NEGATES.findall(a)) != sorted(m.lower() for m in _NEGATES.findall(b)):
+        return False
+    words_a, words_b = _wording(a), _wording(b)
+    return bool(words_a and words_b) and SequenceMatcher(None, words_a, words_b, autojunk=False).ratio() >= 0.8
+
+
+def avoided(mentions: Sequence[tuple[int, int]], text: str) -> list[bool]:
+    """For each command a lesson mentions (its span in ``text``, in order), whether the lesson says to
+    avoid it rather than use it: "use `uv run pytest` instead of `pytest`" avoids `pytest`, "never
+    use `X`" avoids X. A clause break ends a "not"; "or" between two commands carries it over."""
+    found: list[bool] = []
+    end = 0
+    for start, stop in mentions:
+        between = text[end:start]
+        breaks = list(_CLAUSE.finditer(between))
+        if found and not breaks and _ALSO.match(between):
+            found.append(found[-1])  # "`pytest` or `python -m pytest`": the same way as the one before
+        else:
+            found.append(bool(_AVOIDS.search(between[breaks[-1].end():] if breaks else between)))
+        end = stop
+    return found
 
 
 def draft_lesson(cue: LessonCue, *, focus_title: str, focus_kind: Optional[str], previous_steps: Sequence[str],

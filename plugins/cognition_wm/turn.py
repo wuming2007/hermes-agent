@@ -57,7 +57,7 @@ def on_pre_llm_call(*, session_id: str = "", turn_id: str = "", user_message: An
         )
         state.notes.update(model=model or "", provider=provider or "")
         runtime.remember_turn(state)
-        runtime.prune_once()
+        runtime.upkeep()
         latest = _latest_instruction(state.lineage_root, text if owner else None)
         body = snapshot.render_body(state, runtime.settings(), latest_instruction=latest)
         context = snapshot.for_turn(body, conversation_history or [])

@@ -9,7 +9,6 @@ isolated HERMES_HOME. Commands are stand-in scripts.
 import os
 import stat
 from pathlib import Path
-from typing import Callable
 
 from tests.fakes.fake_llm_provider import FakeLLMServer, Text, ToolCall, write_hermes_home
 
@@ -27,8 +26,8 @@ def _task(title: str) -> ToolCall:
 class Project:
     """One user working in one project directory; each session id is another conversation."""
 
-    def __init__(self, tmp_path: Path, monkeypatch, name: str = "work"):
-        self.tmp_path, self.monkeypatch = tmp_path, monkeypatch
+    def __init__(self, tmp_path: Path, monkeypatch, name: str = "work", config: str = _ON):
+        self.tmp_path, self.monkeypatch, self.config = tmp_path, monkeypatch, config
         self.work = tmp_path / name
         self.work.mkdir(exist_ok=True)
         self.home = Path(os.environ["HERMES_HOME"])
@@ -50,7 +49,7 @@ class Project:
         from hermes_state import SessionDB
 
         self.server.start()
-        write_hermes_home(self.home, self.server.base_url, extra_config=_ON)
+        write_hermes_home(self.home, self.server.base_url, extra_config=self.config)
         discover_plugins(force=True)
         self.db = SessionDB(db_path=self.home / "state.db")
         self.monkeypatch.chdir(self.work)
@@ -228,3 +227,81 @@ def test_lesson_text_never_reaches_long_term_memory():
     for content in ("<lessons rev=\"abc\"> uv run pytest </lessons>", "keep xp_0123456789ab in mind"):
         directive = scope_gate.on_pre_tool_call(tool_name="memory", args={"action": "add", "content": content})
         assert directive["action"] == "block"
+
+
+# ------------------------------------------------------------------ review round (2026-09-27)
+
+
+def _owner_lesson(behavior: str, *, status: str, tags: tuple, exceptions: str = ""):
+    from plugins.cognition_wm import runtime
+    from plugins.cognition_wm.lessons import topic_terms
+    from plugins.cognition_wm.model import SourceRef
+
+    said = SourceRef(type="user_message", session_id="earlier", turn_id="t1", ref="m", at=1.0, authored_by="owner",
+                     run_id="run-a")
+    return _store().add_experience(
+        kind="procedure", scope="project", project_key=runtime.project_key(), task_kind=None,
+        situation="running the tests", behavior=behavior, exceptions=exceptions, tags=tags,
+        lesson_key=" ".join(sorted(topic_terms(behavior))), status=status, origin=said)
+
+
+def test_only_lessons_shown_whole_count_as_shown(tmp_path, monkeypatch):
+    """A lesson that does not fit is left out whole, never cut off before its exception, and only
+    lessons actually shown count as seen: the user's "yes" cannot confirm one they never saw."""
+    tight = _ON.replace("        calibration: true\n", "        calibration: true\n        lessons_max_chars: 220\n")
+    with Project(tmp_path, monkeypatch, config=tight) as project:
+        short = _owner_lesson("use `uv run pytest`", status="active", tags=("測試", "pytest"))
+        long = _owner_lesson("run the whole suite with `uv run pytest -q` and read its summary line before saying "
+                             "anything about the tests", status="candidate", tags=("測試", "suite"),
+                             exceptions="except docs-only changes, where a spot check is enough")
+        project.turn("day2", "跑一下測試")
+        row = project.last_user_row()
+        project.turn("day2", "對，以後都這樣做")
+
+    block = row[row.index("<lessons"):]
+    assert "…" not in block and short.experience_id in block and long.experience_id not in block
+    assert _store().experience(long.experience_id).status == "candidate"
+
+
+def test_a_command_only_echoed_is_not_following_a_lesson(tmp_path, monkeypatch):
+    """Printing `uv run pytest` is not running it: no credit, and no promotion across conversations."""
+    with Project(tmp_path, monkeypatch) as project:
+        project.teach_correction()
+        (lesson,) = _store().experiences()
+        for day in ("day2", "day3"):
+            project.script += [_task(f"跑測試 {day}"), ToolCall("terminal", {"command": "echo 'uv run pytest'"}),
+                               Text("測試都通過了。")]
+            project.turn(day, "跑一下測試")
+
+    assert _store().signal_summary(lesson.experience_id).verifications == 0
+    assert _store().experience(lesson.experience_id).status == "candidate"
+
+
+def test_running_the_command_a_lesson_replaces_is_not_following_it(tmp_path, monkeypatch):
+    with Project(tmp_path, monkeypatch) as project:
+        project.script += [project.run("pytest -q"), Text("測試都通過了。"), Text("好。")]
+        project.turn("day1", "幫我跑測試")
+        project.turn("day1", "不對，要用 `uv run pytest` 而不是 `pytest`")
+        (lesson,) = _store().experiences()
+        project.script += [_task("跑測試 day2"), project.run("pytest -q"), Text("測試都通過了。")]
+        project.turn("day2", "跑一下測試")
+
+    assert _store().signal_summary(lesson.experience_id).verifications == 0
+
+
+def test_a_kept_lesson_is_not_copied_into_memory_or_a_skill_even_without_its_markers(tmp_path, monkeypatch):
+    """A copy in long-term memory or a skill would outlive the lesson's revocation. A write that
+    repeats a kept lesson word for word is refused; a reworded copy is not caught (see the docs)."""
+    from plugins.cognition_wm import scope_gate
+
+    with Project(tmp_path, monkeypatch) as project:
+        project.teach_correction()
+        (lesson,) = _store().experiences()
+        copy = f"User preference: {lesson.behavior}"
+        memory = scope_gate.on_pre_tool_call(tool_name="memory", args={"action": "add", "content": copy})
+        skill = scope_gate.on_pre_tool_call(tool_name="skill_manage", args={
+            "action": "create", "name": "run-tests", "content": f"# Running tests\n\n{copy}\n"})
+        unrelated = scope_gate.on_pre_tool_call(tool_name="memory", args={"action": "add", "content": "User lives in Taipei."})
+
+    assert (memory or {}).get("action") == (skill or {}).get("action") == "block"
+    assert unrelated is None

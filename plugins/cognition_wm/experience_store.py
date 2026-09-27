@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS outcomes(
   task_id TEXT, project_key TEXT NOT NULL, task_kind TEXT NOT NULL, claim_class TEXT NOT NULL,
   actor_kind TEXT NOT NULL, actor_id TEXT NOT NULL, provider TEXT NOT NULL, hermes_version TEXT NOT NULL,
   result TEXT NOT NULL, prior_result TEXT, reason TEXT NOT NULL DEFAULT '', evidence_ids TEXT NOT NULL DEFAULT '[]',
-  intervention TEXT NOT NULL DEFAULT '{}', relabelled_by TEXT, at REAL NOT NULL);
+  intervention TEXT NOT NULL DEFAULT '{}', relabelled_by TEXT, at REAL NOT NULL, claim TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS experiences_by_project ON experiences(project_key, status);
 CREATE INDEX IF NOT EXISTS experiences_by_scope ON experiences(scope, status);
 CREATE INDEX IF NOT EXISTS signals_by_experience ON experience_signals(experience_id);
@@ -127,6 +127,10 @@ class ExperienceStore(WorkingMemoryStore):
         store._learning_limits = learning_limits
         with store._lock:  # idempotent DDL; executescript commits on its own, so not inside _write()
             store._conn.executescript(_SCHEMA)
+            columns = {row[1] for row in store._conn.execute("PRAGMA table_info(outcomes)")}
+            if "claim" not in columns:  # a store made before reports kept their own words
+                store._conn.execute("ALTER TABLE outcomes ADD COLUMN claim TEXT NOT NULL DEFAULT ''")
+                store._conn.commit()
         with store._write() as conn:
             conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE"
                          " SET value=excluded.value WHERE CAST(meta.value AS INTEGER) < CAST(excluded.value AS INTEGER)",
@@ -305,13 +309,14 @@ class ExperienceStore(WorkingMemoryStore):
             result=row["result"], prior_result=row["prior_result"], reason=row["reason"],
             evidence_ids=tuple(json.loads(row["evidence_ids"])), intervention=json.loads(row["intervention"]),
             relabelled_by=SourceRef.from_json(row["relabelled_by"]) if row["relabelled_by"] else None, at=row["at"],
+            claim=row["claim"],
         )
 
     def record_outcome(self, *, evidence_key: str, session_id: str, turn_id: str, task_id: Optional[str],
                        project_key: str, task_kind: str, claim_class: str, actor_kind: str, actor_id: str,
                        provider: str, hermes_version: str, result: str, reason: str = "",
                        evidence_ids: Iterable[str] = (), intervention: Optional[dict] = None,
-                       at: Optional[float] = None) -> bool:
+                       at: Optional[float] = None, claim: str = "") -> bool:
         """Record one claimed result; False when the same evidence was already recorded."""
         if result not in OUTCOME_RESULTS or actor_kind not in ACTOR_KINDS:
             raise WorkingMemoryError(f"unknown outcome {result!r} for {actor_kind!r}")
@@ -319,10 +324,19 @@ class ExperienceStore(WorkingMemoryStore):
             return conn.execute(
                 "INSERT OR IGNORE INTO outcomes(outcome_id, evidence_key, session_id, turn_id, task_id, project_key,"
                 " task_kind, claim_class, actor_kind, actor_id, provider, hermes_version, result, reason, evidence_ids,"
-                " intervention, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " intervention, at, claim) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (_new_id("oc"), evidence_key, session_id, turn_id, task_id, project_key, task_kind, claim_class,
                  actor_kind, actor_id, provider, hermes_version, result, reason, _dumps(list(evidence_ids)),
-                 _dumps(intervention or {}), self._clock() if at is None else at)).rowcount == 1
+                 _dumps(intervention or {}), self._clock() if at is None else at, clip(claim, 300))).rowcount == 1
+
+    def outcome(self, outcome_id: str) -> Optional[Outcome]:
+        rows = self._read("SELECT * FROM outcomes WHERE outcome_id=?", (outcome_id,))
+        return self._to_outcome(rows[0]) if rows else None
+
+    def outcome_by_key(self, evidence_key: str) -> Optional[Outcome]:
+        """The record a result rests on: the first one with that key (a rerun adds none of its own)."""
+        rows = self._read("SELECT * FROM outcomes WHERE evidence_key=?", (evidence_key,))
+        return self._to_outcome(rows[0]) if rows else None
 
     def outcomes(self, *, project_key: Optional[str] = None, task_kind: Optional[str] = None,
                  claim_class: Optional[str] = None, actor_kind: Optional[str] = None, actor_id: Optional[str] = None,
@@ -400,6 +414,10 @@ class ExperienceStore(WorkingMemoryStore):
         return len(turns)
 
     # ------------------------------------------------------------------ upkeep
+
+    def now(self) -> float:
+        """This store's clock (what its records are stamped with)."""
+        return self._clock()
 
     def maintain(self, *, expire_after_days: float, stale_after_days: float) -> dict[str, int]:
         """Let unsupported experiences lapse (a candidate expires, an active one goes stale) and drop

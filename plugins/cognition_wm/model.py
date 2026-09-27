@@ -186,3 +186,4 @@ class Outcome:
     intervention: dict
     relabelled_by: SourceRef | None
     at: float
+    claim: str = ""  # a report's own words for it (what our later checks must be about to settle it)
