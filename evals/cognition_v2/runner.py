@@ -402,14 +402,16 @@ def run(home: Path, cases_path: Path, out: Path, *, arms: list[str], repeats: in
 
 def _serve_case() -> None:
     """Inside the confinement: the one case run the runner sent on stdin; each row goes to stdout
-    after the one-time key it came with."""
+    after the one-time key it came with. The stream is taken before the case runs: compacting imports
+    the TUI gateway, which points sys.stdout at stderr for its own protocol."""
+    out = sys.stdout
     job = json.loads(sys.stdin.read())
     key, case, arm_name, repeat = job["key"], job["case"], job["arm"], job["repeat"]
     try:
         for row in _run_case(case, arm_name, repeat, Path(os.environ["HERMES_HOME"])):
-            print(f"{key}\t{json.dumps(row, ensure_ascii=False)}", flush=True)
+            print(f"{key}\t{json.dumps(row, ensure_ascii=False)}", file=out, flush=True)
     except Exception as exc:
-        print(f"{key}\t{json.dumps(_error_row(case, arm_name, repeat, exc), ensure_ascii=False)}", flush=True)
+        print(f"{key}\t{json.dumps(_error_row(case, arm_name, repeat, exc), ensure_ascii=False)}", file=out, flush=True)
 
 
 def summarize(path: Path) -> dict:

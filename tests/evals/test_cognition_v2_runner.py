@@ -322,3 +322,27 @@ def test_one_broken_case_is_recorded_and_the_run_goes_on(tmp_path, monkeypatch):
     assert [(r["kind"], r["case"]) for r in rows] == [("error", "broken"), ("turn", "fine"), ("case", "fine")]
     assert "disk full" in rows[0]["error"]
     assert runner.summarize(out)["on"]["errors"] == 1
+
+
+def test_a_case_runs_rows_reach_the_runner_after_something_takes_over_stdout(capsys, monkeypatch):
+    """Compacting imports the TUI gateway, which points sys.stdout at stderr for its own protocol; the
+    rows after it must still reach the runner, or the case run ends "without a summary"."""
+    import io
+    import sys
+
+    from evals.cognition_v2 import runner
+
+    def run_case(case, arm_name, repeat, home):
+        yield {"kind": "turn", "turn": 0}
+        monkeypatch.setattr(sys, "stdout", sys.stderr)  # what importing tui_gateway.server does
+        yield {"kind": "turn", "turn": 1}
+        yield {"kind": "case", "case": case["id"]}
+
+    monkeypatch.setattr(runner, "_run_case", run_case)
+    monkeypatch.setenv("HERMES_HOME", "/nonexistent-eval-run-home")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"key": "k1", "case": {"id": "c"}, "arm": "on", "repeat": 0})))
+    runner._serve_case()
+    out = capsys.readouterr().out
+
+    assert [json.loads(line.split("\t", 1)[1])["kind"] for line in out.splitlines() if line.startswith("k1\t")] == [
+        "turn", "turn", "case"]
