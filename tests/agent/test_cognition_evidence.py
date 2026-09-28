@@ -106,6 +106,11 @@ SIXTEEN_LAYERS_READ = ("terminal", {"command": " ".join(f"V{i}=1" for i in range
 NEGATED_IN_A_ONE_LINE_FUNCTION = ("terminal", {"command": "set -e; function f { ! uv run pytest -q; }; f"},
                                   {"output": "1 failed", "exit_code": 0, "error": None})
 CD_BY_EVAL = ("terminal", {"command": "eval 'cd billing' && pytest -q"}, {"output": "3 passed", "exit_code": 0, "error": None})
+def _deploy(command):
+    return ("terminal", {"command": command}, {"output": "done", "exit_code": 0, "error": None})
+
+
+SHADOWED_INSIDE = _deploy("STAGE=billing REGION=europe bash -c 'STAGE=shipping ./deploy.sh' && echo done")
 PROCESS_LIST = ("process_manage", {"action": "list"},
                 {"processes": [{"session_id": "proc_1", "command": "python billing_worker.py --port 8081",
                                 "status": "running", "pid": 4242, "uptime_seconds": 30, "output_preview": "listening"}]})
@@ -351,6 +356,33 @@ def test_each_tool_result_is_classified_by_what_it_did_and_how_it_ended(step, ki
         pytest.param([CD_BY_EVAL], "The billing tests pass.", [], id="a-cd-run-by-eval"),
         # a listing is read whole, like any tool that is not a shell run
         pytest.param([PROCESS_LIST], "I verified billing_worker.py is running.", [], id="a-process-listing"),
+        # a variable the nested shell sets again is its own; one it leaves alone is still what it was given
+        pytest.param([SHADOWED_INSIDE], "billing 已部署完成。", [("deployed", "target_not_shown")],
+                     id="an-inner-assignment-shadows-the-outer-one"),
+        pytest.param([SHADOWED_INSIDE], "shipping 已部署完成。", [], id="the-inner-value-is-what-ran"),
+        pytest.param([SHADOWED_INSIDE], "europe 已部署完成。", [], id="an-outer-variable-set-nowhere-inside"),
+        pytest.param([_deploy("STAGE=billing bash -c 'export STAGE=shipping; ./deploy.sh'")], "billing 已部署完成。",
+                     [("deployed", "target_not_shown")], id="shadowed-by-export"),
+        pytest.param([_deploy("STAGE=billing bash -c 'STAGE=shipping; ./deploy.sh'")], "billing 已部署完成。",
+                     [("deployed", "target_not_shown")], id="shadowed-by-a-bare-assignment"),
+        pytest.param([_deploy("STAGE=billing bash -c 'unset STAGE; ./deploy.sh'")], "billing 已部署完成。",
+                     [("deployed", "target_not_shown")], id="dropped-by-unset"),
+        pytest.param([_deploy("STAGE=billing bash -c 'env -i ./deploy.sh'")], "billing 已部署完成。",
+                     [("deployed", "target_not_shown")], id="dropped-by-env-i"),
+        pytest.param([_deploy("STAGE=billing bash -c 'env -u STAGE ./deploy.sh'")], "billing 已部署完成。",
+                     [("deployed", "target_not_shown")], id="dropped-by-env-u"),
+        pytest.param([_deploy("STAGE=billing bash -c \"eval 'STAGE=shipping'; ./deploy.sh\"")], "billing 已部署完成。",
+                     [("deployed", "target_not_shown")], id="shadowed-by-eval"),
+        pytest.param([_deploy("STAGE=billing bash -c \"STAGE=shipping bash -c './deploy.sh'\"")], "billing 已部署完成。",
+                     [("deployed", "target_not_shown")], id="shadowed-one-shell-further-in"),
+        pytest.param([_deploy("STAGE=billing bash -c 'source ./stage.env; ./deploy.sh'")], "billing 已部署完成。",
+                     [("deployed", "target_not_shown")], id="a-file-sourced-may-set-it"),
+        pytest.param([_deploy("env -i STAGE=billing bash -c './deploy.sh'")], "billing 已部署完成。", [],
+                     id="given-after-env-i"),
+        pytest.param([_deploy("sudo -u billing bash -c './deploy.sh' && echo done")], "billing 已部署完成。", [],
+                     id="an-outer-wrapper-still-runs-the-nested-shell"),
+        pytest.param([_deploy("STAGE=billing bash -c 'STAGE=shipping ./migrate.sh; ./deploy.sh'")], "billing 已部署完成。",
+                     [], id="set-again-for-one-inner-command-only"),
     ],
 )
 def test_claims_need_evidence_of_their_own_kind(steps, answer, unsupported):
@@ -468,6 +500,23 @@ def test_a_failing_run_negated_inside_braces_is_not_a_pass(body):
 
     assert (shell.returncode, [(c.claim_class, c.reason) for c in report.unsupported]) == (
         0, [("tests_pass", "result_not_shown")])
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.parametrize("stage, unsupported", [
+    pytest.param("billing", [("deployed", "target_not_shown")], id="the-value-set-again-inside"),
+    pytest.param("shipping", [], id="the-value-that-ran"),
+])
+def test_a_variable_the_nested_shell_sets_again_is_its_own(tmp_path, stage, unsupported):
+    """The shell's own answer: the inner STAGE=shipping is what the deploy sees, not the outer billing."""
+    stand_in = tmp_path / "deploy.sh"
+    stand_in.write_text('#!/bin/sh\necho "$STAGE"\n', encoding="utf-8")
+    stand_in.chmod(0o755)
+    line = "STAGE=billing bash -c 'STAGE=shipping ./deploy.sh' && echo done"
+    shell = subprocess.run(["bash", "-c", line], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    report = build_evidence_report(f"{stage} 已部署完成。", _turn(_deploy(line)))
+
+    assert (shell.stdout, [(c.claim_class, c.reason) for c in report.unsupported]) == ("shipping\ndone\n", unsupported)
 
 
 def test_runtime_nudges_do_not_start_a_new_turn():

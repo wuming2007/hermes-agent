@@ -386,11 +386,85 @@ def _moved(where: str, step: str) -> str:
     return to if to.startswith(("/", "~")) or not where else f"{where}/{to}"
 
 
-def _outcomes(command: str, shown_by_caller: bool, depth: int, around: str = "",
-              where: str = "") -> tuple[list[tuple[str, str, bool, str]], str]:
+_ASSIGNED = re.compile(r"^(\w+)=")
+_ENV_WORD = re.compile(rf"{_ASSIGNMENT}|\S+")
+# Builtins that set or drop the variables they name, and ones that may set variables not named here.
+_NAMES_VARIABLES = frozenset({"export", "unset", "declare", "typeset", "local", "readonly", "read"})
+_SETS_VARIABLES = frozenset({"source", ".", "let", "mapfile", "readarray", "getopts"})
+_VARIABLE = re.compile(r"^(\w+)(?:\+?=|$)")
+
+
+def _layers(written: str) -> list[str]:
+    """The wrappers in front of a simple command, one per layer, as ``_peel`` takes them off."""
+    layers: list[str] = []
+    for _ in range(16):
+        wrapper = _WRAPPER.match(written)
+        if wrapper is None:
+            break
+        layers.append(wrapper.group().strip())
+        written = written[wrapper.end():].lstrip("'\" \t")
+    return layers
+
+
+def _apply(layers: list[str], env: dict) -> tuple[dict, list[str]]:
+    """The variables a command runs with after its wrappers, from the ones it inherits (name ->
+    ``NAME=value``): ``NAME=value`` sets NAME, overriding an inherited value; ``env -i`` drops them
+    all; ``env -u NAME`` drops NAME. Also the other wrappers (``sudo``, ``timeout 60``...), as written."""
+    env, other = dict(env), []
+    for layer in layers:
+        if _ASSIGNED.match(layer):
+            words = [layer]
+        elif layer.split(None, 1)[0] == "env":
+            words = _ENV_WORD.findall(layer)[1:]
+        else:
+            other.append(layer)
+            continue
+        unset_next = False
+        for word in words:
+            assigned = _ASSIGNED.match(word)
+            if unset_next:
+                env.pop(word, None)
+                unset_next = False
+            elif word in ("-u", "--unset"):
+                unset_next = True
+            elif word.startswith(("--unset=", "-u")):
+                env.pop(word.split("=", 1)[1] if word.startswith("--") else word[2:], None)
+            elif word in ("-i", "-", "--ignore-environment") or word.startswith("-S"):
+                env.clear()  # -S splits a string into more words than are read here
+            elif assigned:
+                env.pop(assigned[1], None)
+                env[assigned[1]] = word
+    return env, other
+
+
+def _after(written: str, step: str, env: dict) -> dict:
+    """What a command leaves of the variables its shell inherited: a bare ``NAME=value``, or
+    ``export``/``unset``/``declare``/``read`` of NAME, changes NAME, so its inherited value no longer
+    holds; a command that may set variables it does not name (``source``, ``let``...) or names one
+    that cannot be read here (``export "$N"``) leaves none of them."""
+    if not env:
+        return env
+    word, *args = step.split() or [""]
+    names = {found[1] for layer in _layers(written) if (found := _ASSIGNED.match(layer))}
+    if word in _SETS_VARIABLES or (word == "printf" and "-v" in args):
+        return {}
+    if not step or word in _NAMES_VARIABLES:
+        for arg in args:
+            found = _VARIABLE.match(arg)
+            if found is None and not arg.startswith("-"):
+                return {}
+            names |= {found[1]} if found else set()
+        return {name: text for name, text in env.items() if name not in names}
+    return env
+
+
+def _outcomes(command: str, shown_by_caller: bool, depth: int, around: tuple = (), inherited: dict | None = None,
+              where: str = "") -> tuple[list[tuple[str, str, bool, str]], str, dict]:
     """Each simple command as (the command it runs, as written, shown, what it ran): as written, behind
-    what runs the nested shell it is in, and where a ``cd`` of its own shell or an outer one moved it;
-    and the directory the line leaves its shell in."""
+    what runs the nested shell it is in (its wrappers, and the variables it was given that still hold),
+    and where a ``cd`` of its own shell or an outer one moved it; and the directory and the given
+    variables the line leaves its shell with."""
+    inherited = dict(inherited or {})
     parts = _scan(command)
     opaque = any(op in _OPAQUE_OPS for _step, op in parts) or "<<" in command
     shown = set() if opaque or not shown_by_caller else _confirmed(parts)
@@ -398,21 +472,29 @@ def _outcomes(command: str, shown_by_caller: bool, depth: int, around: str = "",
     for position, (written, _op) in enumerate(parts):
         step = _peel(written)
         if not step:
+            inherited = _after(written, step, inherited)  # a bare `NAME=value`
             continue
         nested = _SHELL_C.search(step) or _EVAL.search(step)
         if nested and depth < _MAX_DEPTH:
             body, _rest = _unquote(nested["body"])
-            # `STAGE=billing bash -c './deploy.sh'` runs ./deploy.sh with STAGE=billing; a `cd` in a
-            # nested shell moves only its own commands, but eval runs its words in this shell
-            runs_it = written[:len(written) - len(step)]
-            inner, moved = _outcomes(body, position in shown, depth + 1, f"{around}{runs_it}", where)
+            # `STAGE=billing bash -c './deploy.sh'` runs ./deploy.sh with STAGE=billing, unless the nested
+            # shell sets STAGE itself; a `cd` in a nested shell moves only its own commands, but eval runs
+            # its words in this shell
+            given, runs_it = _apply(_layers(written), inherited)
+            inner, moved, left = _outcomes(body, position in shown, depth + 1, (*around, *runs_it), given, where)
             out.extend(inner)
-            where = moved if nested.re is _EVAL else where
+            if nested.re is _EVAL:
+                where = moved
+                inherited = {name: text for name, text in left.items() if inherited.get(name) == text}
         else:
-            ran = f"{around}{written} (in {where})" if where else f"{around}{written}"
+            sees, _wrappers = _apply(_layers(written), inherited)
+            holds = [text for name, text in sees.items() if inherited.get(name) == text]
+            prefix = "".join(f"{text} " for text in (*around, *holds))
+            ran = f"{prefix}{written} (in {where})" if where else f"{prefix}{written}"
             out.append((step, written, position in shown, ran))
             where = _moved(where, step)
-    return out, where
+            inherited = _after(written, step, inherited)
+    return out, where, inherited
 
 
 def step_outcomes(command: str) -> tuple[tuple[str, bool], ...]:

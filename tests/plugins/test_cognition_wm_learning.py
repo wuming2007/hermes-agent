@@ -785,3 +785,32 @@ def test_what_a_nested_shell_was_given_is_not_its_siblings(tmp_path, monkeypatch
 
     assert [o.result for o in _store().outcomes(actor_kind="self", claim_class="deployed")] == ["unknown"]
     assert _store().outcomes(actor_kind="external_agent")[0].result == "reported"
+
+
+# ------------------------------------------------------------------ focused review of de60e86b0b (2026-09-28)
+
+
+@pytest.mark.parametrize("stage, ours, theirs", [
+    pytest.param("billing", "unknown", "reported", id="the-outer-value-set-again-inside"),
+    pytest.param("shipping", "success", "success", id="the-value-that-ran"),
+    pytest.param("europe", "success", "success", id="an-outer-value-left-alone"),
+])
+def test_a_variable_the_nested_shell_sets_again_is_what_was_deployed(tmp_path, monkeypatch, stage, ours, theirs):
+    """`STAGE=billing REGION=europe bash -c 'STAGE=shipping ./deploy.sh'` deployed shipping in europe:
+    billing was given and set again before anything ran, so neither we nor a coding agent deployed it."""
+    script = []
+    with Chat(tmp_path, monkeypatch, _play(script)) as chat:
+        deploy = chat.bin / "deploy.sh"
+        deploy.write_text('#!/bin/sh\necho "deployed $STAGE in $REGION"\n', encoding="utf-8")
+        deploy.chmod(deploy.stat().st_mode | stat.S_IEXEC)
+        chat.stand_in("claude", f"I deployed {stage} to production.")
+        script += [_terminal(chat.cmd(f"claude -p 'deploy {stage}'")), Text(f"Claude 回報已部署 {stage}。"),
+                   _terminal(f"STAGE=billing REGION=europe bash -c 'STAGE=shipping {deploy}' && echo done"),
+                   Text(f"{stage} 已部署完成。")]
+        chat.turn("s1", f"請 claude 部署 {stage}")
+        chat.turn("s1", "你自己也部署確認")
+        printed = [str(m.get("content")) for m in chat.db.get_messages_as_conversation("s1") if m.get("role") == "tool"][-1]
+
+    assert "deployed shipping in europe" in printed
+    assert [o.result for o in _store().outcomes(actor_kind="self", claim_class="deployed")] == [ours]
+    assert _store().outcomes(actor_kind="external_agent")[0].result == theirs
