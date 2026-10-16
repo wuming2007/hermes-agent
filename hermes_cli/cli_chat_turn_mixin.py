@@ -96,6 +96,8 @@ class CLIChatTurnMixin:
         _cprint("")
 
         from agent.notification_presentation import notification_config_snapshot, notification_policy_snapshot
+        from hermes_cli import cli_activity
+        cli_activity.publisher_for(self)
         with notification_policy_snapshot(agent, "cli", notification_config_snapshot()):
             turn = _ChatTurn()
             from gateway.warning_notifications import diagnostic_turn_muted
@@ -112,15 +114,21 @@ class CLIChatTurnMixin:
                 self._prompt_duration = 0.0
                 # Daemon: closing the terminal tab (SIGHUP) must not be kept alive by it.
                 agent_thread = threading.Thread(target=self._chat_run_agent, args=(turn, message), daemon=True)
+                cli_activity.notify(self, "turn_started", getattr(self, "session_id", None))
                 agent_thread.start()
                 interrupt_msg = self._chat_monitor_agent_thread(turn, agent_thread)
                 self._chat_settle_turn(turn)
+                cli_activity.notify(self, "turn_finished", turn.result, session_id=getattr(self, "session_id", None))
                 return self._chat_render_turn(turn, agent_thread, interrupt_msg)
             except Exception as e:
+                cli_activity.notify(self, "turn_finished", None, session_id=getattr(self, "session_id", None),
+                                    error=str(e))
                 _cprint(f"Error: {e}")
                 return None
             finally:
                 self._chat_release_turn_audio(turn)
+                # Only an unfinished turn is affected (KeyboardInterrupt/SystemExit escaped).
+                cli_activity.notify(self, "turn_cancelled", "cli_interrupted")
 
     def _chat_release_turn_audio(self, turn):
         """Every exit path: stop the thinking sound, send the TTS sentinel, cut TTS only if abnormal."""

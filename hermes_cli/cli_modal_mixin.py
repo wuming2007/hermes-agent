@@ -587,6 +587,12 @@ class CLIModalMixin:
         self._paint_now()
 
     def _clarify_callback(self, question, choices, multi_select=False, questions=None):
+        """Clarify prompt; the turn is blocked on the user meanwhile (published as ``waiting``)."""
+        from hermes_cli import cli_activity
+        with cli_activity.waiting(self, "input"):
+            return self._clarify_prompt(question, choices, multi_select=multi_select, questions=questions)
+
+    def _clarify_prompt(self, question, choices, multi_select=False, questions=None):
         """Clarify-tool platform callback (agent thread): show the selection UI (or freetext for
         open-ended questions) and block until the key bindings answer or the timeout dismisses it
         (the agent is then told to decide). ``multi_select`` shows checkboxes (Space toggles).
@@ -1068,6 +1074,12 @@ class CLIModalMixin:
         return {"answers": partial, "timed_out": True}
 
     def _sudo_password_callback(self) -> str:
+        """Sudo prompt; published as ``waiting`` while it blocks the turn."""
+        from hermes_cli import cli_activity
+        with cli_activity.waiting(self, "input"):
+            return self._sudo_password_prompt()
+
+    def _sudo_password_prompt(self) -> str:
         """Prompt for a sudo password through the prompt_toolkit UI (agent thread); clarify-style
         state + queue answered by the Enter binding."""
         from cli import _DIM, _RST, _cprint
@@ -1097,6 +1109,16 @@ class CLIModalMixin:
                            *, allow_permanent: bool = True,
                            allow_session: bool = True,
                            smart_denied: bool = False) -> str:
+        """Approval prompt; published as ``waiting`` while it blocks the turn (answered only here)."""
+        from hermes_cli import cli_activity
+        with cli_activity.waiting(self, "approval"):
+            return self._approval_prompt(command, description, allow_permanent=allow_permanent,
+                                         allow_session=allow_session, smart_denied=smart_denied)
+
+    def _approval_prompt(self, command: str, description: str,
+                         *, allow_permanent: bool = True,
+                         allow_session: bool = True,
+                         smart_denied: bool = False) -> str:
         """Dangerous-command approval through the prompt_toolkit UI (agent thread).
 
         Choices: once / session / always / deny (see ``_approval_choices``), plus 'view' for long
@@ -1245,6 +1267,11 @@ class CLIModalMixin:
         return result
 
     def _secret_capture_callback(self, var_name: str, prompt: str, metadata=None) -> dict:
+        from hermes_cli import cli_activity
+        with cli_activity.waiting(self, "input"):
+            return self._secret_capture_prompt(var_name, prompt, metadata)
+
+    def _secret_capture_prompt(self, var_name: str, prompt: str, metadata=None) -> dict:
         self._capture_modal_input_snapshot()
         try:
             return prompt_for_secret(self, var_name, prompt, metadata)

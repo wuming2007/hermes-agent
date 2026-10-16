@@ -48,6 +48,9 @@ class CLIStreamMixin:
 
     def _on_thinking(self, text: str) -> None:
         """Called by agent when thinking starts/stops. Updates TUI spinner."""
+        if text:
+            from hermes_cli import cli_activity
+            cli_activity.notify(self, "model_call_started")
         if getattr(getattr(self, "agent", None), "_mute_notification_reply", False):
             return
         from gateway.warning_notifications import DiagnosticText, render_notification
@@ -313,6 +316,8 @@ class CLIStreamMixin:
         if text is None:
             self._flush_stream()
             self._reset_stream_state()
+            from hermes_cli import cli_activity
+            cli_activity.notify(self, "segment_boundary")
             return
         if not text:
             return
@@ -422,6 +427,8 @@ class CLIStreamMixin:
             HermesCLI, _ACCENT, _RST, _STREAM_PARTIAL_PREVIEW_LEN, _cprint, _strip_markdown_syntax, datetime)
         if not text:
             return
+        from hermes_cli import cli_activity
+        cli_activity.notify(self, "answer_text")
         # Defer content while the reasoning box renders so reasoning always lands BEFORE it.
         if self.show_reasoning and getattr(self, "_reasoning_box_opened", False):
             self._deferred_content = getattr(self, "_deferred_content", "") + text
@@ -693,6 +700,12 @@ class CLIStreamMixin:
             self._invalidate()
             return
 
+        if event_type in ("tool.started", "tool.completed"):
+            from hermes_cli import cli_activity
+            if event_type == "tool.started":
+                cli_activity.notify(self, "tool_started", function_name)
+            else:
+                cli_activity.notify(self, "tool_finished")
         # Feed the pet: tools mean "running"; a failed tool latches the turn to end on a sulk.
         if event_type == "tool.started":
             self._pet_reasoning = False
