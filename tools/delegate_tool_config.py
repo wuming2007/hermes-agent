@@ -484,6 +484,7 @@ def _resolve_child_runtime(
     override_base_url: Optional[str], override_api_key: Optional[str], override_api_mode: Optional[str],
     override_acp_command: Optional[str], override_acp_args: Optional[List[str]],
     routing_cfg: Optional[Dict[str, Any]] = None,
+    override_reasoning_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Child credentials, transport and routing (config override > parent inherit) as ``AIAgent`` kwargs. Rules that
     are easy to break: api_mode is re-derived (not inherited) when the child's provider differs from the parent's
@@ -559,11 +560,17 @@ def _resolve_child_runtime(
             getattr(parent_agent, "requested_provider", None) or effective_provider
         )
 
-    # Reasoning: delegation.reasoning_effort > parent. Keep the raw value — a
-    # YAML ``false`` must disable thinking, not coerce to "" and inherit.
+    # Reasoning: model-role override > delegation.reasoning_effort > parent.
+    # Keep the raw value — a YAML ``false`` must disable thinking, not coerce
+    # to "" and inherit. 模型角色是使用者在設定裡「指名」的路線，它帶的
+    # reasoning effort 要贏過全域的 delegation.reasoning_effort。
     child_reasoning = getattr(parent_agent, "reasoning_config", None)
+    if override_reasoning_config is not None:
+        child_reasoning = override_reasoning_config
     try:
-        delegation_effort = delegation_cfg.get("reasoning_effort")
+        delegation_effort = (
+            None if override_reasoning_config is not None else delegation_cfg.get("reasoning_effort")
+        )
         if delegation_effort or delegation_effort is False:
             from hermes_constants import parse_reasoning_effort
             parsed = parse_reasoning_effort(delegation_effort)

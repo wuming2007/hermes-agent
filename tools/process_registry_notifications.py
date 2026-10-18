@@ -225,6 +225,11 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
                   + (f", {r['duration_seconds']}s" if r.get("duration_seconds") is not None else "")
                   + (", TRUNCATED: hit max_iterations — work may be incomplete" if r_truncated else ""))
         lines += ["", header + ") ---"]
+        # 選了模型角色的任務：把「角色 / 設定解析出的身分 / 實際執行身分」一起
+        # 列出來，對不上就看得見。沒選角色的任務不多印任何一行。
+        _identity = _format_task_model_identity(r)
+        if _identity:
+            lines.append(_identity)
         if r_status in _DONE and r_summary:
             if r_truncated:
                 lines.append(_TRUNCATED_SUMMARY_NOTE)
@@ -239,6 +244,29 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
             lines.append(f"Full live transcript (complete tool/assistant trace): {r['live_transcript']}")
         lines += _process_accounting_lines(r)
     return "\n".join(lines)
+
+
+def _format_task_model_identity(result: dict) -> str:
+    """一個已選模型角色的任務的身分行；沒選角色時回傳 ""。
+
+    三件事刻意分開寫：``Model role`` 是主代理選了哪個已配置的角色；``resolved``
+    是使用者設定解析出的期望 provider/model；``ran on`` 是從子代理物件讀出的
+    實際 provider/model，也就是可確認的執行身分（不是子代理自己在摘要裡聲稱的
+    名字）。對不上時兩段並列就看得出來，不必在這裡下判斷。
+    """
+    role = result.get("model_role")
+    if not isinstance(role, str) or not role:
+        return ""
+    parts = [f"Model role: {role}"]
+    declared = result.get("model_role_resolved")
+    if isinstance(declared, dict):
+        bits = [f"{k}={declared[k]}" for k in ("provider", "model", "reasoning_effort") if declared.get(k)]
+        if bits:
+            parts.append("resolved " + ", ".join(bits))
+    ran = [f"{k}={result[k]}" for k in ("provider", "model") if isinstance(result.get(k), str) and result[k]]
+    if ran:
+        parts.append("ran on " + ", ".join(ran))
+    return "(" + "; ".join(parts) + ")"
 
 
 def _process_accounting_lines(r: dict) -> list:

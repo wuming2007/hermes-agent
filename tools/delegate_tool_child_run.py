@@ -367,6 +367,9 @@ def _register_child(
         "goal": goal,
         "delegation_id": _str_or_none(getattr(child, "_delegation_id", None)),
         "model": _str_or_none(getattr(child, "model", None)),
+        # 選了哪個模型角色（沒選是 None）—— 讓 TUI / 稽核看得出這個子代理是不是
+        # 被指派去跑獨立審查路線的。
+        "model_role": _str_or_none(getattr(child, "_delegate_model_role", None)),
         "started_at": time.time(), "status": "running", "tool_count": 0, "agent": child,
         # Owning conversation's durable session id (same lineage completion delivery routes by), sourced from the
         # child's stamp so it survives a parent_agent rebuild between dispatch and run; used for list/steer/stop
@@ -596,6 +599,16 @@ def _build_result_entry(
         "api_calls": result.get("api_calls", 0),
         "duration_seconds": duration,
         "model": _str_or_none(getattr(child, "model", None)),
+        # 執行身分：從 child agent 物件讀出的 provider —— 「這個子代理實際被接
+        # 到哪裡」的可確認證據，刻意不採用子代理在摘要裡自稱的模型名稱。
+        "provider": _str_or_none(getattr(child, "provider", None)),
+        # 選了哪個模型角色（沒選是 None），以及設定解析出的期望身分。兩者與上面
+        # 的實際身分分開記錄，對不上就看得出來。
+        "model_role": _str_or_none(getattr(child, "_delegate_model_role", None)),
+        "model_role_resolved": (
+            getattr(child, "_delegate_model_role_resolved", None)
+            if isinstance(getattr(child, "_delegate_model_role_resolved", None), dict) else None
+        ),
         "exit_reason": exit_reason,
         # A budget-exhausted child still returns a summary (status stays
         # "completed"), so the parent needs this explicit flag.

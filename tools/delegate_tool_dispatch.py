@@ -45,6 +45,9 @@ class _Batch:
     origin_owner_session_record: Any
     origin_session_history_delivery: bool
     overall_start: float
+    # 每個任務選用的委派模型角色（``delegation.model_roles``），順序對齊
+    # ``task_list``；未選角色的位置是 None。只做完成紀錄用途。
+    model_roles: Optional[List[Optional[str]]] = None
     # Set on per-group units carved out by ``_dispatch_background``; None for the whole batch / ungrouped units.
     group: Optional[str] = None
     unit_id: Optional[str] = None  # the async registry id this unit runs under (``<call_id>-k`` for split calls)
@@ -394,7 +397,7 @@ def _dispatch_unit(unit: _Batch, unit_id: Optional[str], slot_key: Optional[str]
         # Call-wide goals: completion formatting indexes them by task_index.
         goals=[t["goal"] for t in unit.task_list], context=unit.context,
         toolsets=None,  # metadata for the completion block only; subagents inherit the parent's toolsets
-        role=unit.top_role, model=unit.creds["model"],
+        role=unit.top_role, model=unit.creds["model"], model_roles=unit.model_roles,
         runner=lambda: _execute_and_aggregate(unit, honor_parent_interrupt=False),
         interrupt_fn=_interrupt, delegation_id=unit_id, slot_key=slot_key,
         task_indexes=[i for (i, _, _) in unit.children] if len(unit.children) < len(unit.task_list) else None,

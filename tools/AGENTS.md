@@ -134,7 +134,22 @@ no `delegate_task`, `clarify`, `memory`, `send_message`, `cronjob`; keeps `execu
 `orchestrator` (keeps `delegate_task`; gated by `delegation.orchestrator_enabled`, bounded by
 `delegation.max_spawn_depth`, default 2). Config knobs under `delegation:`:
 `max_concurrent_children, independent_completions, max_spawn_depth, child_timeout_seconds, orchestrator_enabled,
-subagent_auto_approve, inherit_mcp_toolsets, max_iterations`. **Child processes:** a child's background
+subagent_auto_approve, inherit_mcp_toolsets, max_iterations, model_roles`. **Per-subtask model roles:**
+`delegation.provider`/`model` are global (every subagent moves). `delegation.model_roles` is the per-subtask
+dimension: a task may carry `model_role: "<name>"` to run on a user-configured route
+(provider/model/base_url/reasoning_effort/fallback_providers). Resolution lives in
+`tools/delegation_model_roles.py`; `_resolve_task_model_roles` resolves **every** requested role before any child
+is built, so an unknown/unusable role fails the whole call with nothing spawned and no substitute model. The model
+may only name a configured role — never an endpoint, credential or model id — and `leaf`/`orchestrator` are
+rejected as role names (the unrelated delegation `role`). A role's definition is passed down as the child's
+`routing_cfg`, so its fallback policy is owned by the role and `_resolve_child_fallback_chain(pinned=True)` keeps
+a pinned child off the parent's chain. The role's `reasoning_effort` beats the global
+`delegation.reasoning_effort`. `model_role` is added to the tool schema by `_build_dynamic_schema_overrides()`
+only when roles are configured (zero cost otherwise; config does not change mid-conversation, so the schema stays
+byte-stable for the session). Results, the active-subagent registry and the completion block carry `model_role`,
+`model_role_resolved` (what config resolved to) and `provider`/`model` read off the child agent — the executable
+identity, never the child's self-reported name. Model-facing guidance lives in the
+`independent-review-roles` skill, not the top-level tool description. **Child processes:** a child's background
 processes are killed at its teardown and their notices are suppressed in the parent; `process_manage(action="handoff")`
 (children only) flips `ProcessSession.owner_task_id` to the parent under the registry lock
 (`process_registry.transfer_ownership`) so the completion routes and reaps by the new owner; un-handed leftovers land on

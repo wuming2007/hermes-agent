@@ -157,7 +157,7 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
         owner_started_at = None
     task_payload = {
         key: record.get(key)
-        for key in ("goal", "goals", "context", "toolsets", "role", "model", "is_batch", "task_indexes", "task_transcripts", *_ROUTING_KEYS)
+        for key in ("goal", "goals", "context", "toolsets", "role", "model", "model_roles", "is_batch", "task_indexes", "task_transcripts", *_ROUTING_KEYS)
         if key in record}
     try:  # where the children's terminals started; lets recovery add a git-state hint
         task_payload["owner_cwd"] = os.getcwd()
@@ -671,6 +671,7 @@ def _dispatch_admitted(
     progress_fn: Optional[Callable[[], tuple]], capacity_error: str, slot_key: Optional[str] = None,
     task_indexes: Optional[List[int]] = None,
     task_transcripts: Optional[Dict[str, str]] = None,
+    model_roles: Optional[List[Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """Shared dispatch core for single (``goals is None``) and batch units. Capacity check +
     record insert happen under ONE lock hold so concurrent dispatches can't both pass the check
@@ -686,6 +687,8 @@ def _dispatch_admitted(
     record: Dict[str, Any] = {
         "delegation_id": delegation_id, "goal": goal, **({"goals": list(goals)} if is_batch else {}),
         "context": context, "toolsets": list(toolsets) if toolsets else None, "role": role, "model": model,
+        # 每個任務選用的委派模型角色，順序對齊 goals；未選角色是 None。純紀錄。
+        **({"model_roles": list(model_roles)} if model_roles else {}),
         "session_key": session_key, "origin_ui_session_id": origin_ui_session_id,
         "origin_session_id": origin_session_id, "parent_session_id": parent_session_id,
         **_capture_routing_origin(),
@@ -784,6 +787,7 @@ def dispatch_async_delegation_batch(
     progress_fn: Optional[Callable[[], tuple]] = None, slot_key: Optional[str] = None,
     task_indexes: Optional[List[int]] = None,
     task_transcripts: Optional[Dict[str, str]] = None,
+    model_roles: Optional[List[Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """Dispatch a fan-out unit (a whole batch, or one ``group`` of a delegate_task call) as ONE
     background unit: ``runner`` runs its tasks and returns the combined ``{"results": [...],
@@ -797,7 +801,7 @@ def dispatch_async_delegation_batch(
     combined_goal = unit_goals[0] if n == 1 else f"{n} parallel subagents: " + "; ".join(g[:40] for g in unit_goals)
     handle = _dispatch(
         delegation_id=delegation_id, goal=combined_goal, goals=goals, context=context,
-        toolsets=toolsets, role=role, model=model, session_key=session_key,
+        toolsets=toolsets, role=role, model=model, model_roles=model_roles, session_key=session_key,
         parent_session_id=parent_session_id, runner=runner,
         origin_ui_session_id=origin_ui_session_id, origin_session_id=origin_session_id,
         interrupt_fn=interrupt_fn, max_async_children=max_async_children, progress_fn=progress_fn, slot_key=slot_key,
@@ -869,6 +873,7 @@ def _push_completion_event(record: Dict[str, Any], result: Dict[str, Any], statu
         "parent_session_id": record.get("parent_session_id"),
         "goal": record.get("goal", ""), **({"goals": record.get("goals")} if is_batch else {}),
         "context": record.get("context"), "toolsets": record.get("toolsets"), "role": record.get("role"),
+        "model_roles": record.get("model_roles"),
         "model": record.get("model") if is_batch else (result.get("model") or record.get("model")),
         "status": status, **payload, "dispatched_at": dispatched_at, "completed_at": completed_at,
         **({} if is_batch else {"exit_reason": result.get("exit_reason")}),
