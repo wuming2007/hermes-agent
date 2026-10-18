@@ -1272,6 +1272,41 @@ delegation:
   #                                           # Resolves full credentials (base_url, api_key) automatically.
   #                                           # Supported: openrouter, nous, zai, kimi-coding, minimax
 
+  # --- Per-subtask model roles -------------------------------------------
+  # `model` / `provider` above are GLOBAL: they move every subagent. Model
+  # roles are per-subtask instead — the agent may pass
+  # delegate_task(tasks=[{..., "model_role": "review"}]) to run ONE subtask
+  # on a route you define here, while every other subtask keeps the default
+  # behavior (parent inheritance, or the global override above).
+  #
+  # The agent can only name a role that exists here. It cannot pass an
+  # endpoint, a credential, or a model id of its own. An unknown or
+  # unresolvable role fails loudly — no other model is substituted.
+  #
+  # Leave this out entirely (the default) and the `model_role` parameter is
+  # not even sent to the model, so it costs nothing.
+  #
+  # Role names are yours; `leaf` and `orchestrator` are reserved (they are
+  # the unrelated delegation `role`). Model ids are yours too — nothing here
+  # is pinned to a "latest" or "strongest" model, and nothing auto-upgrades.
+  # A role may resolve to the same model the main agent runs on; that is
+  # still an independent review (fresh context), not a stronger model.
+  #
+  # model_roles:
+  #   review:                                 # independent review pass
+  #     provider: openai
+  #     model: "<model id you choose>"
+  #     reasoning_effort: high                # none/false, minimal, low,
+  #                                           # medium, high, xhigh, max, ultra
+  #   second_opinion:                         # optional; omit to keep it off
+  #     provider: gemini
+  #     model: "<model id you choose>"
+  #     reasoning_effort: medium
+  #   # A role may also target a direct OpenAI-compatible endpoint:
+  #   # local_review:
+  #   #   base_url: "http://localhost:1234/v1"
+  #   #   model: "<model id you choose>"
+
 # =============================================================================
 # Honcho Integration (Cross-Session User Modeling)
 # =============================================================================

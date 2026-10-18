@@ -153,6 +153,85 @@ delegation:
 
 If omitted, subagents use the same model as the parent.
 
+## Per-Subtask Model Roles
+
+`delegation.model` / `delegation.provider` above are **global** — they move every
+subagent. A **model role** is the per-subtask dimension: you define named routes,
+and the agent may put one subtask on one of them while every other subtask keeps
+the default behavior.
+
+The typical use is an independent review pass after an important change: a fresh
+context, with no stake in the work, looks at the diff.
+
+```yaml
+# In ~/.hermes/config.yaml
+delegation:
+  model_roles:
+    review:
+      provider: openai
+      model: "<model id you choose>"
+      reasoning_effort: high        # none/false, minimal, low, medium, high, xhigh, max, ultra
+    second_opinion:                 # optional — omit the block to keep it off
+      provider: gemini
+      model: "<model id you choose>"
+```
+
+The agent then selects a role per task:
+
+```python
+delegate_task(tasks=[
+    {"goal": "Write the migration"},                              # default behavior
+    {"goal": "Review the migration diff", "model_role": "review"} # the review route
+])
+```
+
+A role may also target a direct OpenAI-compatible endpoint with
+`base_url` / `api_key` / `api_mode` instead of `provider`, exactly like the
+global override.
+
+### What the agent can and cannot do
+
+| | |
+|---|---|
+| **Can** | Name a role that exists in your `model_roles`. |
+| **Cannot** | Pass an endpoint, an API key, or a model id of its own. |
+| **Cannot** | Change its own model or the main conversation. |
+| **Cannot** | Silently fall back — an unknown or unresolvable role fails the call with the configured names listed, and no subagent is spawned. |
+
+A subagent pinned to a model role also does **not** inherit the parent's
+fallback model chain. If the role's model turns out to be unavailable at request
+time, that subagent fails and says so, instead of quietly finishing on a
+different model.
+
+`model_role` is unrelated to `role` (`leaf` / `orchestrator`): `role` controls
+whether a child may delegate further, `model_role` picks provider, model and
+reasoning effort. `leaf` and `orchestrator` are reserved and cannot be used as
+role names.
+
+When `model_roles` is absent (the default), the `model_role` parameter is not
+sent to the model at all, so it costs nothing.
+
+### Honest reporting
+
+Nothing here is pinned to a "latest" or "strongest" model — the model ids are
+yours and never auto-upgrade. A role may well resolve to the same model the main
+agent is running on; that is still an *independent review* (fresh context), not a
+stronger model, and the agent is instructed to describe it that way.
+
+Each result, and the background completion block, records three things
+separately:
+
+- `model_role` — which role was selected.
+- `model_role_resolved` — the provider / model / reasoning effort your config
+  resolved to.
+- `provider` / `model` — read off the child agent itself, i.e. where the subagent
+  was actually connected. This is the execution evidence; a subagent's own claim
+  about which model it is never counts.
+
+The bundled `independent-review-roles` skill tells the agent when a review is
+worth the cost, what to hand the reviewer, and how to verify the findings before
+acting on them.
+
 ## Inherited Tool Access
 
 `delegate_task` does not accept a model-facing `toolsets` parameter. Each subagent inherits the parent's enabled toolsets so the model cannot grant a child capabilities that the parent does not have. Configure the parent's tools before starting the conversation if delegated work needs additional capabilities.
@@ -358,6 +437,7 @@ delegation:
   model: "google/gemini-3-flash-preview"             # Optional provider/model override
   provider: "openrouter"                             # Optional built-in provider
   api_mode: anthropic_messages                       # optional; auto-detected from base_url for anthropic_messages endpoints
+  # model_roles: {...}                               # Optional per-subtask routes — see "Per-Subtask Model Roles"
 
 # Or use a direct custom endpoint instead of provider:
 delegation:

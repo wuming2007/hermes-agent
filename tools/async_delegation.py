@@ -206,7 +206,10 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
         owner_started_at = None
     task_payload = {
         key: record.get(key)
-        for key in ("goal", "goals", "context", "toolsets", "role", "model", "is_batch")
+        for key in (
+            "goal", "goals", "context", "toolsets", "role", "model",
+            "model_roles", "is_batch",
+        )
         if key in record
     }
     with _DB_LOCK, _transaction() as conn:
@@ -937,6 +940,7 @@ def dispatch_async_delegation_batch(
     role: str,
     model: Optional[str],
     session_key: str,
+    model_roles: Optional[List[Optional[str]]] = None,
     parent_session_id: Optional[str] = None,
     runner: Callable[[], Dict[str, Any]],
     origin_ui_session_id: str = "",
@@ -981,6 +985,9 @@ def dispatch_async_delegation_batch(
         "toolsets": list(toolsets) if toolsets else None,
         "role": role,
         "model": model,
+        # 每個任務選用的委派模型角色（delegation.model_roles），順序對齊
+        # goals；未選角色的任務是 None。只做紀錄用途。
+        "model_roles": list(model_roles) if model_roles else None,
         "session_key": session_key,
         "origin_ui_session_id": origin_ui_session_id,
         "origin_session_id": origin_session_id,
@@ -1103,6 +1110,7 @@ def _push_batch_completion_event(
         "toolsets": event_record.get("toolsets"),
         "role": event_record.get("role"),
         "model": event_record.get("model"),
+        "model_roles": event_record.get("model_roles"),
         "status": status,
         "is_batch": True,
         # The full per-task results list — the formatter renders a

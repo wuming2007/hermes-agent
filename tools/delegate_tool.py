@@ -40,8 +40,18 @@ from agent.interrupt_compat import request_hard_interrupt
 # Must match hermes_cli.runtime_provider.RUNTIME_PROVIDER_TYPE_CUSTOM.
 _RUNTIME_PROVIDER_CUSTOM = "custom"
 from tools import file_state
+from tools.delegation_model_roles import (
+    ModelRoleError,
+    available_model_role_names,
+    resolve_model_role,
+    resolved_role_identity,
+)
 from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb
 from utils import base_url_hostname, is_truthy_value
+
+# 任務 dict 裡用來選模型角色的鍵。與 delegation 的 `role`
+# (leaf / orchestrator) 刻意分開命名，兩者是不同維度，不可混用。
+_MODEL_ROLE_TASK_FIELD = "model_role"
 
 
 # Tools that children must never have access to
@@ -1210,6 +1220,13 @@ def _build_child_agent(
     # ACP transport overrides from trusted delegation config.
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
+    # 已解析好的 reasoning 設定，來自 delegation.model_roles 的角色定義。
+    # 非 None 時優先於全域 delegation.reasoning_effort 與父代理繼承。
+    override_reasoning_config: Optional[Dict[str, Any]] = None,
+    # True 代表這個子代理的模型是「使用者指名的」（delegation.model_roles）。
+    # 此時不繼承父代理的 fallback chain —— 指名的模型不可用時要如實失敗，
+    # 不能悄悄換成別的模型後仍然回報完成。
+    override_pin_model: bool = False,
     # Per-call role controlling whether the child can further delegate.
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
@@ -1434,14 +1451,21 @@ def _build_child_agent(
         effective_provider = "copilot-acp"
         effective_api_mode = "chat_completions"
 
-    # Resolve reasoning config: delegation override > parent inherit
+    # Resolve reasoning config: model-role override > delegation override >
+    # parent inherit. 角色是使用者在設定裡「指名」的審查路線，所以它的
+    # reasoning effort 要贏過全域的 delegation.reasoning_effort。
     parent_reasoning = getattr(parent_agent, "reasoning_config", None)
     child_reasoning = parent_reasoning
+    if override_reasoning_config is not None:
+        child_reasoning = override_reasoning_config
     try:
         # Keep the raw value — ``str(x or "")`` would coerce a YAML boolean
         # False (``reasoning_effort: false``) to "" and inherit the parent
         # instead of disabling thinking for children.
-        delegation_effort = delegation_cfg.get("reasoning_effort")
+        delegation_effort = (
+            None if override_reasoning_config is not None
+            else delegation_cfg.get("reasoning_effort")
+        )
         if delegation_effort or delegation_effort is False:
             from hermes_constants import parse_reasoning_effort
 
@@ -1461,6 +1485,11 @@ def _build_child_agent(
     # agent does.  _fallback_chain is a list accepted by AIAgent's
     # fallback_model parameter (which handles both list and dict forms).
     parent_fallback = getattr(parent_agent, "_fallback_chain", None) or None
+    if override_pin_model:
+        # 模型角色是「指名這一組 provider/model 來做這件事」。繼承 fallback
+        # chain 會讓指名的模型 404／額度耗盡時，子代理改用父代理鏈上的另一個
+        # 模型卻照樣回報 completed —— 那就等於假冒成功。寧可讓它失敗。
+        parent_fallback = None
 
     # Inherit the parent's OpenRouter provider-preference filters by default
     # (so subagents routed to the same provider honour the same routing
@@ -2102,6 +2131,13 @@ def _run_single_child(
                     if isinstance(getattr(child, "model", None), str)
                     else None
                 ),
+                # 選了哪個模型角色（沒選就是 None）—— 讓 TUI / 稽核看得出
+                # 這個子代理是不是被指派去跑獨立審查路線的。
+                "model_role": (
+                    getattr(child, "_delegate_model_role", None)
+                    if isinstance(getattr(child, "_delegate_model_role", None), str)
+                    else None
+                ),
                 "started_at": time.time(),
                 "status": "running",
                 "tool_count": 0,
@@ -2381,6 +2417,13 @@ def _run_single_child(
         _output_tokens = getattr(child, "session_completion_tokens", 0)
         _model = getattr(child, "model", None)
 
+        # 執行身分：從建好的 child agent 物件讀出來的 provider/model，
+        # 是「這個子代理實際被接到哪裡」的可確認證據 —— 刻意不採用子代理
+        # 在 summary 裡自稱的模型名稱。
+        _provider = getattr(child, "provider", None)
+        _chosen_model_role = getattr(child, "_delegate_model_role", None)
+        _resolved_identity = getattr(child, "_delegate_model_role_resolved", None)
+
         entry: Dict[str, Any] = {
             "task_index": task_index,
             "status": status,
@@ -2388,6 +2431,13 @@ def _run_single_child(
             "api_calls": api_calls,
             "duration_seconds": duration,
             "model": _model if isinstance(_model, str) else None,
+            "provider": _provider if isinstance(_provider, str) else None,
+            "model_role": (
+                _chosen_model_role if isinstance(_chosen_model_role, str) else None
+            ),
+            "model_role_resolved": (
+                _resolved_identity if isinstance(_resolved_identity, dict) else None
+            ),
             "exit_reason": exit_reason,
             "tokens": {
                 "input": (
@@ -2783,19 +2833,26 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     role: Optional[str] = None,
     background: Optional[bool] = None,
+    model_role: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
 
     Supports two modes:
-      - Single: provide goal (+ optional context and role)
-      - Batch:  provide tasks array [{goal, context, role}, ...]
+      - Single: provide goal (+ optional context, role and model_role)
+      - Batch:  provide tasks array [{goal, context, role, model_role}, ...]
 
     The 'role' parameter controls whether a child can further delegate:
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    'model_role' 是**另一個維度**：它從 ``delegation.model_roles``（可信任
+    設定）挑一組 provider / model / reasoning effort 給**這一個**子任務用，
+    與 leaf / orchestrator 無關。未指定時完全不介入，既有的全域
+    ``delegation.provider`` / ``delegation.model`` 覆寫與父模型繼承行為原封
+    不動。Per-task model_role 勝過 top-level。
 
     Returns JSON with results array, one entry per task.
     """
@@ -2897,6 +2954,40 @@ def delegate_task(
         if not task.get("goal", "").strip():
             return tool_error(f"Task {i} is missing a 'goal'.")
 
+    # ── 按子任務選模型角色 (delegation.model_roles) ─────────────────────
+    # 每個角色都在建立「任何」子代理之前先解析完。這樣指名的角色若不存在或
+    # 解析失敗，整個呼叫會乾淨地失敗，而不是先派出一半的 fan-out、再回報
+    # 錯誤（那會讓使用者以為部分審查已經完成）。
+    # 未指定角色的任務拿到 `creds`（既有全域行為），一個字都沒改。
+    top_model_role = (
+        model_role.strip() if isinstance(model_role, str) and model_role.strip() else None
+    )
+    task_model_roles: List[Optional[str]] = []
+    task_role_resolutions: List[Optional[Dict[str, Any]]] = []
+    _role_resolution_cache: Dict[str, Dict[str, Any]] = {}
+    for task in task_list:
+        _raw_role = task.get(_MODEL_ROLE_TASK_FIELD)
+        _requested = (
+            _raw_role.strip()
+            if isinstance(_raw_role, str) and _raw_role.strip()
+            else top_model_role
+        )
+        if not _requested:
+            task_model_roles.append(None)
+            task_role_resolutions.append(None)
+            continue
+        _cache_key = _requested.lower()
+        if _cache_key not in _role_resolution_cache:
+            try:
+                _role_resolution_cache[_cache_key] = resolve_model_role(
+                    _requested, cfg, parent_agent, _resolve_delegation_credentials
+                )
+            except ModelRoleError as exc:
+                return tool_error(str(exc))
+        _resolved = _role_resolution_cache[_cache_key]
+        task_model_roles.append(_resolved["name"])
+        task_role_resolutions.append(_resolved)
+
     overall_start = time.monotonic()
     results = []
 
@@ -2941,6 +3032,10 @@ def delegate_task(
         # Per-task role beats top-level; normalise again so unknown
         # per-task values warn and degrade to leaf uniformly.
         effective_role = _normalize_role(t.get("role") or top_role)
+        # 這一個任務的憑證來源：有選模型角色就用角色解析出來的 bundle，
+        # 沒選就用既有的全域 `creds`（可能是「全部繼承父代理」的 None 組合）。
+        _resolution = task_role_resolutions[i]
+        _task_creds = _resolution["credentials"] if _resolution else creds
         child = _build_child_preserving_parent_tools(
             task_index=i,
             goal=t["goal"],
@@ -2948,20 +3043,28 @@ def delegate_task(
             # Subagents always inherit the parent's toolsets; the model
             # cannot choose or narrow them (no model-facing toolsets arg).
             toolsets=None,
-            model=creds["model"],
+            model=_task_creds.get("model"),
             max_iterations=effective_max_iter,
             task_count=n_tasks,
             parent_agent=parent_agent,
-            override_provider=creds["provider"],
-            override_base_url=creds["base_url"],
-            override_api_key=creds["api_key"],
-            override_api_mode=creds["api_mode"],
-            override_request_overrides=creds.get("request_overrides"),
-            override_max_tokens=creds.get("max_output_tokens"),
-            override_acp_command=creds.get("command"),
-            override_acp_args=creds.get("args"),
+            override_provider=_task_creds.get("provider"),
+            override_base_url=_task_creds.get("base_url"),
+            override_api_key=_task_creds.get("api_key"),
+            override_api_mode=_task_creds.get("api_mode"),
+            override_request_overrides=_task_creds.get("request_overrides"),
+            override_max_tokens=_task_creds.get("max_output_tokens"),
+            override_acp_command=_task_creds.get("command"),
+            override_acp_args=_task_creds.get("args"),
+            override_reasoning_config=(
+                _resolution["reasoning_config"] if _resolution else None
+            ),
+            override_pin_model=_resolution is not None,
             role=effective_role,
         )
+        # 讓結果紀錄分得清「選了哪個角色 / 設定解析出什麼」與「實際跑了什麼」。
+        # 實際身分由 _run_single_child 從 child 物件讀，不採信模型自述。
+        child._delegate_model_role = task_model_roles[i]
+        child._delegate_model_role_resolved = resolved_role_identity(_resolution)
         # Tee the child's progress events into its live transcript log.
         # wrap_progress_callback preserves the inner callback contract
         # (including the _flush attribute) and never lets writer failures
@@ -3323,6 +3426,9 @@ def delegate_task(
             toolsets=None,
             role=top_role,
             model=creds["model"],
+            # 每個任務選了哪個模型角色（對齊 goals 的順序，未選為 None）。
+            # 純屬完成區塊的紀錄用，不影響已經建好的子代理。
+            model_roles=list(task_model_roles),
             session_key=_session_key,
             origin_ui_session_id=_origin_ui_session_id,
             origin_session_id=_wake_sid,
@@ -3747,12 +3853,46 @@ def _build_role_param_description() -> str:
     )
 
 
+def _build_model_role_param_description(role_names: List[str]) -> str:
+    """Compose the 'model_role' parameter description for the configured roles.
+
+    只在使用者真的設定了 ``delegation.model_roles`` 時才會被用到，所以這段
+    文字可以直接點名實際存在的角色，不必描述假設性的設定。
+    """
+    return (
+        "Optional: run THIS subtask on one of the model roles the user "
+        f"configured in delegation.model_roles ({', '.join(role_names)}). "
+        "Unrelated to 'role' (leaf/orchestrator) — that one controls nesting, "
+        "this one picks provider+model+reasoning effort.\n"
+        "Omit it for normal work: the subagent then keeps the default "
+        "delegation settings (parent model inheritance or the user's global "
+        "delegation.provider/model). Do NOT set it on every task — each role "
+        "may cost more and spending is the user's.\n"
+        "USE IT FOR: an independent review pass after a change you consider "
+        "important — cross-module contracts, data consistency, permissions, "
+        "state machines, or a wrong value you could not localise. For large "
+        "amounts of repetitive work, split the work instead; line count alone "
+        "is not a reason to escalate.\n"
+        "A review role may resolve to the same model you are running on. That "
+        "is still an INDEPENDENT review (fresh context, no stake in the "
+        "change) — report it as such, never as a stronger model.\n"
+        "The role name is all you may pass: endpoints, credentials and model "
+        "IDs come from the user's config and cannot be set here. An unknown or "
+        "unresolvable role fails loudly; no other model is substituted."
+    )
+
+
 def _build_dynamic_schema_overrides() -> dict:
     """Return per-call schema overrides reflecting current config.
 
     Plugged into ToolEntry.dynamic_schema_overrides so every
     get_definitions() pass rewrites the description fields to the user's
     actual limits.
+
+    ``model_role`` 只有在 ``delegation.model_roles`` 真的有可用角色時才加進
+    schema —— 沒設定的使用者完全不必為這個參數付 token。設定在對話中不會變，
+    所以同一個 session 內這份 schema 仍然是 byte-stable 的（與既有的
+    tasks/role 動態描述同一個前提）。
     """
     overrides_params = {
         **DELEGATE_TASK_SCHEMA["parameters"],
@@ -3763,6 +3903,34 @@ def _build_dynamic_schema_overrides() -> dict:
     }
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
     overrides_params["properties"]["role"]["description"] = _build_role_param_description()
+
+    # tasks.items 是嵌套結構，上面那層淺拷貝不夠 —— 再拷一層才不會寫到靜態 schema。
+    _tasks = overrides_params["properties"]["tasks"]
+    _items = dict(_tasks["items"])
+    _items["properties"] = {k: dict(v) for k, v in _items["properties"].items()}
+    _tasks["items"] = _items
+
+    try:
+        role_names = available_model_role_names(_load_config())
+    except Exception as exc:  # pragma: no cover — 設定壞掉不該讓工具消失
+        logger.debug("Could not read delegation.model_roles: %s", exc)
+        role_names = []
+
+    if role_names:
+        _model_role_prop = {
+            "type": "string",
+            "enum": list(role_names),
+            "description": _build_model_role_param_description(role_names),
+        }
+        overrides_params["properties"]["model_role"] = _model_role_prop
+        _items["properties"]["model_role"] = {
+            "type": "string",
+            "enum": list(role_names),
+            "description": (
+                "Per-task model role override. See top-level 'model_role' for "
+                "semantics and when to use it."
+            ),
+        }
 
     return {
         "description": _build_top_level_description(),
@@ -3903,6 +4071,7 @@ registry.register(
         tasks=_strip_model_hidden_task_fields(args.get("tasks")),
         max_iterations=args.get("max_iterations"),
         role=args.get("role"),
+        model_role=args.get("model_role"),
         background=_model_background_value(args, kw.get("parent_agent")),
         parent_agent=kw.get("parent_agent"),
     ),

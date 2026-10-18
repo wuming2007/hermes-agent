@@ -2207,6 +2207,40 @@ def _format_age(seconds: float) -> str:
     return f"{h}h" if m == 0 else f"{h}h{m}m"
 
 
+def _format_task_model_identity(result: dict) -> str:
+    """Render the model-role line for one delegated task, or "" when unused.
+
+    三件事刻意分開寫：
+    * ``Model role`` —— 主代理當時選了哪個已配置的角色。
+    * ``resolved`` —— 使用者設定解析出來的期望 provider/model。
+    * ``ran on`` —— 子代理物件上實際的 provider/model，也就是可確認的執行
+      身分（不是子代理自己在摘要裡聲稱的名字）。
+
+    對不上時兩段並列就足以看出來，不必在這裡下判斷。
+    """
+    role = result.get("model_role")
+    if not isinstance(role, str) or not role:
+        return ""
+    parts = [f"Model role: {role}"]
+    declared = result.get("model_role_resolved")
+    if isinstance(declared, dict):
+        bits = [
+            f"{key}={declared[key]}"
+            for key in ("provider", "model", "reasoning_effort")
+            if declared.get(key)
+        ]
+        if bits:
+            parts.append("resolved " + ", ".join(bits))
+    ran_bits = [
+        f"{key}={result[key]}"
+        for key in ("provider", "model")
+        if isinstance(result.get(key), str) and result[key]
+    ]
+    if ran_bits:
+        parts.append("ran on " + ", ".join(ran_bits))
+    return "(" + "; ".join(parts) + ")"
+
+
 def _format_async_delegation(evt: dict) -> str:
     """Format an async-delegation completion into a self-contained re-injection.
 
@@ -2282,6 +2316,11 @@ def _format_async_delegation(evt: dict) -> str:
                 header += f", {r['duration_seconds']}s"
             header += ") ---"
             lines.append(header)
+            # 選了模型角色的任務：把「角色 / 設定解析出的身分 / 實際執行身分」
+            # 一起列出來，對不上就看得見。沒選角色的任務不多印任何一行。
+            _role_line = _format_task_model_identity(r)
+            if _role_line:
+                lines.append(_role_line)
             if r_status in ("completed", "success") and r_summary:
                 lines.append(r_summary)
             elif r_summary:

@@ -1004,10 +1004,38 @@ Roles:
   own workers. Gated by `delegation.orchestrator_enabled` (default true)
   and bounded by `delegation.max_spawn_depth` (default 2).
 
+Per-subtask model roles (`delegation.model_roles`):
+
+- `delegation.provider` / `delegation.model` are **global** — they move every
+  subagent. A *model role* is the per-subtask dimension: the model may pass
+  `model_role` (top level, or per task inside `tasks`) to run ONE subtask on a
+  route the user configured, while every other subtask keeps the existing
+  behavior (parent inheritance, or the global override).
+- Resolution lives in `tools/delegation_model_roles.py`; `delegate_task`
+  resolves **every** role before building any child, so an unknown/unusable
+  role fails the whole call with nothing spawned and no substitute model.
+- The model may only name a configured role — never an endpoint, credential,
+  or model id. The `model_role` parameter is added to the schema by
+  `_build_dynamic_schema_overrides()` only when roles are configured, so it
+  costs nothing otherwise (config does not change mid-conversation, so the
+  schema stays byte-stable for the session, same premise as the existing
+  `tasks` / `role` dynamic descriptions).
+- `leaf` / `orchestrator` are reserved and rejected as role names — the two
+  concepts must not be mixed.
+- A role-pinned child does NOT inherit `parent._fallback_chain`
+  (`override_pin_model=True`): a named model that 404s or runs out of quota
+  must fail visibly, not finish on another model while reporting success.
+- Results and the async completion block carry `model_role`,
+  `model_role_resolved` (what config resolved to) and `provider` / `model`
+  read off the child agent (the executable identity — never the child's
+  self-reported name).
+- Guidance for the model lives in the `independent-review-roles` skill, not in
+  the top-level tool description (which is at its size ceiling).
+
 Key config knobs (under `delegation:` in `config.yaml`):
 `max_concurrent_children`, `max_spawn_depth`, `child_timeout_seconds`,
 `orchestrator_enabled`, `subagent_auto_approve`, `inherit_mcp_toolsets`,
-`max_iterations`.
+`max_iterations`, `model`, `provider`, `reasoning_effort`, `model_roles`.
 
 Durability rule: background `delegate_task` is detached from the current
 turn but still process-local. For work that must survive process restart, use
