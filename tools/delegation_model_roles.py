@@ -8,7 +8,8 @@
 子任務仍沿用原本的繼承行為。
 
 本模組把 ``delegation.model_roles``（使用者寫在 config.yaml 的可信任設定）
-映射成 provider / model / reasoning effort。設計上的硬性邊界：
+映射成 provider / model / reasoning effort（也接受 ``fallback_providers``，
+讓這條路線自己宣告備援政策）。設計上的硬性邊界：
 
 * **只接受設定裡存在的角色名稱。**模型只能給一個角色字串，不能自己填
   endpoint、api_key，也不能猜模型 ID。
@@ -67,6 +68,7 @@ _RECOGNISED_ROLE_KEYS = frozenset(
         "api_key",
         "api_mode",
         "reasoning_effort",
+        "fallback_providers",
         "description",
     }
 )
@@ -289,6 +291,10 @@ def resolve_model_role(
         "name": requested,
         "credentials": credentials,
         "reasoning_config": defn.get("_reasoning_config"),
+        # 這條路線的「設定擁有者」。呼叫端把它當成一個 delegation-like 區塊傳
+        # 下去，好讓 fallback 等政策跟著指名的角色走，而不是誤用一般的
+        # delegation 區塊。內部用的底線鍵不外流。
+        "routing_cfg": {k: v for k, v in defn.items() if not k.startswith("_")},
         "declared": {
             "provider": defn.get("provider"),
             "model": defn.get("model"),
